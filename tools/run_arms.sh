@@ -28,15 +28,15 @@ done
 log "pretrain over"
 
 log "phase 2: waiting for PA preps"
-until grep -q "kept /" "$D/log_prep_pa200.txt" 2>/dev/null \
-   && grep -q "kept /" "$D/log_prep_pa75.txt" 2>/dev/null; do sleep 60; done
+until grep -aq "kept /" "$D/log_prep_pa400.txt" 2>/dev/null \
+   && grep -aq "kept /" "$D/log_prep_pa75.txt" 2>/dev/null; do sleep 60; done
 log "preps done"
 mkdir -p "$D/archive"
 cp "$D/xpred75_runs/best.pt" "$D/archive/xpred75_best_$(date +%Y%m%d).pt" \
   && log "pretrain best.pt archived"
 
-log "phase 3: arm1 PA-200 scratch"
-PREP_OUT=$D/prep_pa200 MIXIT_RUNS=$D/pa200_scratch_runs WIN=512 STEPS=40000 HOURS=2 \
+log "phase 3: arm1 PA-400 scratch"
+PREP_OUT=$D/prep_pa400 MIXIT_RUNS=$D/pa400_scratch_runs WIN=1024 STEPS=40000 HOURS=2 \
   python3 train/train_xpred.py > "$D/log_arm1.txt" 2>&1
 log "arm1 done"
 
@@ -45,7 +45,7 @@ PREP_OUT=$D/prep_pa75 MIXIT_RUNS=$D/pa75_warm_runs INIT=$D/xpred75_runs/best.pt 
   WIN=256 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm2.txt" 2>&1
 log "arm2 done"
 
-log "phase 3: arm3 PA-200 warm-start"
-PREP_OUT=$D/prep_pa200 MIXIT_RUNS=$D/pa200_warm_runs INIT=$D/xpred75_runs/best.pt \
-  WIN=512 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm3.txt" 2>&1
-log "arm3 done -- all arms trained; next: eval_xpred on prep_pa200 and prep_pa75"
+log "phase 3: arm3 PA-400 warm-start"
+PREP_OUT=$D/prep_pa400 MIXIT_RUNS=$D/pa400_warm_runs INIT=$D/xpred75_runs/best.pt \
+  WIN=1024 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm3.txt" 2>&1
+log "arm3 done -- all arms trained; next: eval_xpred on prep_pa400 and prep_pa75"
