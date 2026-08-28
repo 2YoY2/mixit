@@ -64,14 +64,22 @@ for p in glob.glob(f"{ROOT}/mocap_pose/*.npy"):
 tkeys = np.array(sorted(takes))
 print(f"{len(tkeys)} mocap takes")
 
-def gt_speed(path):
-    x = np.load(path)
-    ax = int(np.argmax(x.shape))
-    x = np.moveaxis(x, ax, 0).astype(np.float64)      # time first
-    x = x.reshape(len(x), -1, 3) if x.ndim == 2 and x.shape[1] % 3 == 0 else x
-    if x.ndim != 3: return None
-    v = np.linalg.norm(np.diff(x, axis=0), axis=-1) * 120.0
-    return np.nanmean(np.where(np.isfinite(v), v, np.nan), axis=1)
+def naive(v):
+    return pd.Timestamp(v).to_pydatetime().replace(tzinfo=None)
+
+def gt_speed(path, w0):
+    """Skeleton npy = 0-d object dict {timestamps, positions (T,20,3)}.
+    Returns (t_rel_seconds_on_wifi_clock, mean joint speed)."""
+    d = np.load(path, allow_pickle=True).item()
+    pos = np.asarray(d["positions"], np.float64)
+    t = np.array([(naive(v) - w0).total_seconds() for v in d["timestamps"]])
+    k = np.concatenate([[True], np.diff(t) > 0])
+    pos, t = pos[k], t[k]
+    if len(t) < 240 or t[0] > 15 or t[-1] < 10: return None, None
+    dt = np.diff(t)
+    v = np.linalg.norm(np.diff(pos, axis=0), axis=-1) / dt[:, None]
+    vm = np.nanmean(np.where(np.isfinite(v), v, np.nan), axis=1)
+    return t[1:], vm
 
 def env(e1d):
     n = (len(e1d) - 16) // 8 + 1
@@ -101,8 +109,9 @@ for r in meta.itertuples():
     if len(rows) >= NREC: break
     k = int(tkeys[np.argmin(np.abs(tkeys - r.stamp))])
     if abs(k - r.stamp) > 10: continue
-    g = gt_speed(takes[k])
-    if g is None or len(g) < 240: continue
+    w0 = datetime.strptime(str(int(r.stamp)), "%Y%m%d%H%M%S")
+    tg, gv = gt_speed(takes[k], w0)
+    if tg is None: continue
     x = np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy"), np.float32)
     T = min(len(x), int(CAP_S * FS)); T -= (T - 16) % 8
     if T < 300: continue
@@ -115,7 +124,7 @@ for r in meta.itertuples():
     ex = env(((x - x.mean(0)) ** 2).sum(1))
     if eb is None: continue
     tc = (np.arange(len(eb)) * 8 + 8) / FS
-    gs = np.interp(tc, np.arange(len(g)) / 120.0, g, left=np.nan, right=np.nan)
+    gs = np.interp(tc, tg, gv, left=np.nan, right=np.nan)
     rb, rr, rx = corr(eb, gs), corr(er, gs), corr(ex, gs)
     rpart = corr(resid(er, eb), resid(np.nan_to_num(gs, nan=np.nanmean(gs)), eb))
     rows.append((r.scene, rb, rr, rx, rpart))
