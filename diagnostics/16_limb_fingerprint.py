@@ -40,11 +40,22 @@ def envelopes(imu):                    # (T,5,6) -> (T,5)
     e = np.sqrt((hp ** 2).sum(-1))
     return uniform_filter1d(e, 15, axis=0)
 
-def top_vec(D, w):
+def top_vec(D, w, k=1):
     if w.sum() <= 0: return None
     C = (D * (w / w.sum())[:, None]).conj().T @ D
     _, vec = np.linalg.eigh(C)
-    return vec[:, -1]
+    return vec[:, -1] if k == 1 else vec[:, -k:]
+
+def deflate(D, e_total, k=2):
+    """Remove the top-k global-motion components: the torso/whole-body
+    signature swamps rank-1 per-limb estimates (v1 result: null ~ cross-limb).
+    Limb-specific structure is sought in the residual subspace."""
+    Vg = top_vec(D, e_total, k)
+    return D - (D @ Vg) @ Vg.conj().T
+
+def inter_masks(T, blk=100):
+    b = (np.arange(T) // blk) % 2
+    return b == 0, b == 1
 
 def cos(a, b):
     if a is None or b is None: return np.nan
@@ -76,6 +87,7 @@ for n in sel:
     sc = np.sqrt((np.abs(z - m) ** 2).mean(0)) + 1e-9
     D = (z - m) / sc
     e = envelopes(imu)                                          # (T, 5)
+    D = deflate(D, e.sum(1))
     v, act, W = {}, [], {}
     for i in range(5):
         others = [j for j in range(5) if j != i]
@@ -89,9 +101,9 @@ for n in sel:
         act.append(i)
     if len(act) < 2: continue
     used += 1
-    h = T // 2
+    ma, mb = inter_masks(T)
     for i in act:
-        S[i].append(cos(top_vec(D[:h], W[i][:h]), top_vec(D[h:], W[i][h:])))
+        S[i].append(cos(top_vec(D[ma], W[i][ma]), top_vec(D[mb], W[i][mb])))
     for (i, j) in pairs:
         if i in act and j in act:
             P[(i, j)].append(cos(v[i], v[j]))
