@@ -61,12 +61,31 @@ for n in sel:
     try:
         g = wifi["samples"][n]
         amp = g["amp"][...]
+        pha = g["pha"][...] if os.environ.get("PH", "1") == "1" else None
         imu = imuf["samples"][n]["imu"][...]
     except Exception as ex:
         print(f"  skip {n}: {type(ex).__name__}"); continue
     T = min(len(amp), len(imu))
     if T < 1000: continue
-    Y = feat_energy(amp[:T])
+    amp = amp[:T]
+    if os.environ.get("AGC", "1") == "1":
+        # per-packet per-receiver gain normalisation: AGC multiplies every
+        # antenna/subcarrier of a receiver at once and TRACKS body motion --
+        # a motion-correlated global common mode in every footprint. Kill it
+        # exactly; the spatial pattern survives.
+        rms = np.sqrt((amp ** 2).mean(axis=(2, 3), keepdims=True)) + 1e-9
+        amp = amp / rms
+    Y = feat_energy(amp)
+    if pha is not None:
+        # phase-structure energy: islands (adjacent-subcarrier conj, CFO-free)
+        # on the AGC-cleaned complex; dynamic energy of re+im per feature.
+        c = amp * np.exp(1j * pha[:T])
+        z = (c[..., :-1] * np.conj(c[..., 1:])).reshape(T, -1)
+        zr = np.c_[z.real, z.imag]
+        hp = zr - uniform_filter1d(zr, SM, axis=0)
+        ph_e = uniform_filter1d(hp[:, :z.shape[1]] ** 2
+                                + hp[:, z.shape[1]:] ** 2, SM, axis=0)
+        Y = np.c_[Y, ph_e]
     if os.environ.get("NORM", "static") == "static":
         # remove the ROOM's statistical property: dyn energy at feature f is
         # (limb pattern) x |static field at f|^2 to first order -- the room's
