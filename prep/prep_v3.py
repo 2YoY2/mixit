@@ -123,7 +123,7 @@ def one(job):
         scene = 0 if date <= "20240801" else (1 if date < "20241000" else 2)
         row = (rid, f, node, date, scene, subj, subj % 100, act, trial,
                nb, round(rate, 2), round(fill, 4), imu_ok,
-               "train" if scene <= 1 else "test")
+               "train")   # all 3 OctoNet rooms pre-train; PA scenes 4/5 are the gate
         return row, y.mean(0)
     except Exception:
         if os.environ.get("DEBUG"):

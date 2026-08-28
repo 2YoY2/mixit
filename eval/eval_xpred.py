@@ -91,8 +91,9 @@ def sfrac(p):
     sp = p.mean(0)
     return float((sp ** 2).sum() / max((p ** 2).mean(0).sum(), 1e-12))
 
+MINN = int(os.environ.get("MINN", "80"))
 meta = pd.read_csv(f"{OUT}/meta.csv")
-meta = meta[(meta.split == "test") & (meta.nsamp >= 256)].reset_index(drop=True)
+meta = meta[(meta.split == "test") & (meta.nsamp >= MINN)].reset_index(drop=True)
 print(f"{len(meta)} test recordings, scene {sorted(meta.scene.unique())}")
 
 statics = {int(r.rid): np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy",

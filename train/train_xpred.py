@@ -49,15 +49,18 @@ SNRMAX = float(os.environ.get("SNRMAX", "30.0"))
 WARM   = int(os.environ.get("WARM", "2000"))
 SEED   = int(os.environ.get("SEED", "0"))
 NW     = int(os.environ.get("NW", "6"))
-HINT   = int(os.environ.get("HINT", "1"))         # site template as extra input:
-# room-2 gate v1 (HINT=0) failed -- leak 0.909, pairSNR 0.1 vs deflate 13.8.
-# Only 2 physical training rooms exist; a template-free net cannot learn to
-# infer an unseen room's static and memorises instead (Run 1-2 redux). The
-# hint is deployment-honest: a base station accumulates it from idle traffic.
+HINT   = int(os.environ.get("HINT", "0"))         # user decision: no hint.
+AUG    = int(os.environ.get("AUG", "1"))          # group-consistent amplitude
+# augmentation (synthetic rooms): random smooth per-antenna spectral reshape +
+# gain + subcarrier roll, applied identically to the window AND both statics
+# before the morph target is built -- widens the room manifold so the
+# template-free net must learn room-shape families, not the training rooms.
+INIT   = os.environ.get("INIT", "")               # warm-start ckpt (model only)
 K, C = 114, 228
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
 CHEB = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, K), DEG)  # (K, DEG+1)
+CHEB_AUG = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, K), 3)[:, 1:]
 
 # ---------- statics ----------------------------------------------------------
 def build_statics(meta):
@@ -103,7 +106,23 @@ class Pairs(Dataset):
         s0 = int(self.rng.integers(0, na - WIN + 1))
         x = np.asarray(np.load(f"{OUT}/streams/{ra:06d}.npy",
                                mmap_mode="r")[s0:s0 + WIN], np.float32)
-        tgt = x - morph(self.statics[rb], self.statics[ra])[None, :]
+        sa, sb = self.statics[ra], self.statics[rb]
+        if AUG:
+            prof = np.empty(C, np.float32)
+            for a in (0, 1):
+                prof[a * K:(a + 1) * K] = np.exp(
+                    CHEB_AUG @ self.rng.normal(0, 0.15, 3))
+            prof *= self.rng.uniform(0.8, 1.25)
+            r = int(self.rng.integers(-8, 9))
+            def ap(v):
+                v = v * prof
+                return np.concatenate([np.roll(v[..., :K], r, -1),
+                                       np.roll(v[..., K:], r, -1)], -1)
+            x, sa, sb = ap(x), ap(sa), ap(sb)
+            sc = 1.0 / max(float(np.sqrt((x ** 2).mean())), 1e-12)
+            x = (x * sc).astype(np.float32)
+            sa, sb = (sa * sc).astype(np.float32), (sb * sc).astype(np.float32)
+        tgt = x - morph(sb, sa)[None, :]
         if ioka:
             gi = np.asarray(np.load(f"{OUT}/imu/{ra:06d}.npy",
                                     mmap_mode="r")[s0:s0 + WIN], np.float32)
@@ -201,6 +220,12 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=STEPS)
     step0 = 0
+    if INIT and not os.path.exists(f"{RUNS}/last.pt"):
+        cki = torch.load(os.path.expanduser(INIT), map_location=dev,
+                         weights_only=False)
+        assert cki.get("cfg", {}).get("HINT", 0) == HINT, "HINT mismatch vs INIT"
+        model.load_state_dict(cki["model"])
+        print(f"warm-start from {INIT} (step {cki.get('step')})", flush=True)
     if os.path.exists(f"{RUNS}/last.pt"):
         ck = torch.load(f"{RUNS}/last.pt", map_location=dev, weights_only=False)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
@@ -247,7 +272,8 @@ def main():
             ck = {"model": model.state_dict(), "opt": opt.state_dict(),
                   "sch": sch.state_dict(), "step": step, "steps_total": STEPS,
                   "xpred": True, "cfg": {"DEG": DEG, "WIN": WIN, "IMUW": IMUW,
-                                         "causal": model.causal, "HINT": HINT}}
+                                         "causal": model.causal, "HINT": HINT,
+                                         "AUG": AUG}}
             torch.save(ck, f"{RUNS}/last.pt")
             if v < best:
                 best = v
