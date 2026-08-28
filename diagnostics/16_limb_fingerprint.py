@@ -64,8 +64,9 @@ for n in sel:
     try:
         g = wifi["samples"][n]
         c = g["amp"][...] * np.exp(1j * g["pha"][...])
-        imu = imuf["samples"][n][...]
-    except Exception:
+        imu = imuf["samples"][n]["imu"][...]
+    except Exception as ex:
+        print(f"  skip {n}: {type(ex).__name__} {str(ex)[:60]}")
         continue
     T = min(len(c), len(imu))
     if T < 1000: continue
