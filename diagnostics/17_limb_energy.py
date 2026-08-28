@@ -84,9 +84,16 @@ for n in sel:
     used += 1
     E = np.c_[e, np.ones(T)]
     P, r2 = fit(E, Y); R2S.append(r2)
-    fp = {i: P[i] for i in act}
     blk = (np.arange(T) // 100) % 2
     Pa, _ = fit(E[blk == 0], Y[blk == 0]); Pb, _ = fit(E[blk == 1], Y[blk == 1])
+    if os.environ.get("DIFF", "1") == "1":
+        # kill the common mode in FOOTPRINT space: every normalisation leaves
+        # some shared factor (room ripple, inverse noise floor); comparing
+        # limb footprints MINUS their cross-limb mean isolates what is
+        # actually limb-specific.
+        for M in (P, Pa, Pb):
+            M[act] = M[act] - M[act].mean(0, keepdims=True)
+    fp = {i: P[i] for i in act}
     for i in act:
         S_[i].append(ccos(Pa[i], Pb[i]))
     for (i, j) in pairs:
