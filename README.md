@@ -58,5 +58,8 @@ prices the error at body scale instead of 20 dB below room scale.
 
 Heavy work runs on `netsoft@rosebyte` (jump: `zerdani@csinfra.eurecom.fr:22427`);
 env `source ~/zerdani/phase1/.venv/bin/activate`. One shared GPU — check
-`nvidia-smi` first. Scripts are developed here, shipped by scp, logs pasted
-back. Archive checkpoints before fine-tuning anything.
+`nvidia-smi` first. **Transport is git**: code is developed locally, pushed
+here, and `git pull`ed on the server (clone at
+`~/zerdani/buffer/octonet/mixit`); logs get pasted back. Data, logs, and
+checkpoints never enter the repo (see `.gitignore`). Archive checkpoints
+before fine-tuning anything.
