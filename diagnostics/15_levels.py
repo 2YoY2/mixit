@@ -56,8 +56,9 @@ def split(z):
     dy = float(((z - z.mean(0)) ** 2).mean(0).sum())
     return st, dy
 
+SPLIT = os.environ.get("SPLIT", "test")
 meta = pd.read_csv(f"{OUT}/meta.csv")
-meta = meta[meta.split == "test"].sample(NREC, random_state=0)
+meta = meta[meta.split == SPLIT].sample(NREC, random_state=0)
 rows = []
 for r in meta.itertuples():
     x = np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy"), np.float32)
