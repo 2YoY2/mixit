@@ -92,6 +92,8 @@ def sfrac(p):
     return float((sp ** 2).sum() / max((p ** 2).mean(0).sum(), 1e-12))
 
 MINN = int(os.environ.get("MINN", "80"))
+FSR  = float(os.environ.get("FS", "400"))      # stream rate, for the stress HP window
+STRESS = int(os.environ.get("STRESS", "1"))
 meta = pd.read_csv(f"{OUT}/meta.csv")
 meta = meta[(meta.split == "test") & (meta.nsamp >= MINN)].reset_index(drop=True)
 print(f"{len(meta)} test recordings, scene {sorted(meta.scene.unique())}")
@@ -115,7 +117,7 @@ def arms(x, key):                  # x (T,228) trimmed -> {arm: (s, p)}
 
 ARMS = ("model", "trivial", "deflate")
 per = {a: {"psf": [], "route": [], "r_body": [], "pstat": {}} for a in ARMS}
-r_raw = []
+r_raw, hp_room = [], []
 for r in meta.itertuples():
     x = np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy"), np.float32)
     T = len(x) - ((len(x) - 16) % 8)
@@ -127,6 +129,18 @@ for r in meta.itertuples():
         ex = env(((x - x.mean(0)) ** 2).sum(1))
         rr = corr(ex, gi)
         if rr == rr: r_raw.append(rr)
+    if STRESS and r.Index % 5 == 0:
+        # stress: high-pass the input (1 s moving average removed). No statics
+        # remain, so an honest room slot collapses; a memorised room persists.
+        w = max(3, int(FSR)) | 1
+        ma = pd.DataFrame(x).rolling(w, center=True, min_periods=1).mean() \
+               .to_numpy(np.float32)
+        xh = x - ma
+        with torch.no_grad():
+            sh, _ = net(torch.from_numpy(xh.T[None]).to(dev),
+                        torch.from_numpy(tmpl[key].astype(np.float32)[None]).to(dev))
+        hp_room.append(float((sh[0].cpu().numpy() ** 2).mean()
+                             / max((xh ** 2).mean(), 1e-12)))
     for a, (s, p) in arms(x, key).items():
         per[a]["psf"].append(sfrac(p))
         per[a]["pstat"][int(r.rid)] = p.mean(0)
@@ -155,7 +169,12 @@ for _ in range(NPAIR):
                                     / max(((tgt - p) ** 2).sum(), 1e-12)))
         leak[a].append(corr(per[a]["pstat"][ra], per[a]["pstat"][rb]))
 
-print(f"\nr_raw (raw CSI env vs IMU) median: {np.median(r_raw):+.3f}\n")
+if r_raw:
+    print(f"\nr_raw (raw CSI env vs IMU) median: {np.median(r_raw):+.3f}")
+if hp_room:
+    print(f"stress hp-room (model, room-slot share of high-passed input): "
+          f"median {np.median(hp_room):.3f}  -- low = adaptive, high = memorised room")
+print()
 print(f"{'arm':9s}{'pairSNR':>9s}{'leak':>8s}{'psf':>7s}{'route':>8s}{'r_body':>9s}")
 print("-" * 50)
 for a in ARMS:
