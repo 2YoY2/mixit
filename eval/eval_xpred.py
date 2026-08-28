@@ -46,19 +46,21 @@ DEG = ck["cfg"]["DEG"]
 CHEB = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, K), DEG)
 print(f"ckpt {CKPT} step {ck['step']} cfg {ck['cfg']} dev={dev}")
 
+HINT = int(ck["cfg"].get("HINT", 0))
 from asteroid.masknn import TDConvNet
 class Sep(nn.Module):
     def __init__(self, cin=C, nf=512, L=16, S=8):
         super().__init__()
-        self.enc = nn.Conv1d(cin, nf, L, stride=S)
+        self.enc = nn.Conv1d(cin * (1 + HINT), nf, L, stride=S)
         self.masker = TDConvNet(in_chan=nf, n_src=2, out_chan=nf, n_blocks=8,
                                 n_repeats=4, bn_chan=192, hid_chan=512,
                                 skip_chan=192, mask_act="linear",
                                 causal=ck["cfg"]["causal"], norm_type="cLN")
         self.dec = nn.ConvTranspose1d(nf, cin, L, stride=S)
-    def forward(self, x):
+    def forward(self, x, h=None):
         T = x.shape[-1]
-        e = self.enc(x)
+        xin = torch.cat([x, h.unsqueeze(-1).expand(-1, -1, T)], 1) if HINT else x
+        e = self.enc(xin)
         y = self.dec((self.masker(e) * e.unsqueeze(1)).flatten(0, 1))[..., :T]
         y = y.view(-1, 2, C, T)
         return y[:, 0], y[:, 1] + (x - y.sum(1))
@@ -102,7 +104,8 @@ tmpl = {k: np.mean([statics[int(r)] for r in g.rid], 0)
 def arms(x, key):                  # x (T,228) trimmed -> {arm: (s, p)}
     with torch.no_grad():
         xt = torch.from_numpy(x.T[None]).to(dev)
-        s, p = net(xt)
+        ht = torch.from_numpy(tmpl[key].astype(np.float32)[None]).to(dev)
+        s, p = net(xt, ht)
     s, p = s[0].cpu().numpy().T, p[0].cpu().numpy().T
     t = tmpl[key]
     fit = morph(t, x.mean(0))

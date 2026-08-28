@@ -49,6 +49,11 @@ SNRMAX = float(os.environ.get("SNRMAX", "30.0"))
 WARM   = int(os.environ.get("WARM", "2000"))
 SEED   = int(os.environ.get("SEED", "0"))
 NW     = int(os.environ.get("NW", "6"))
+HINT   = int(os.environ.get("HINT", "1"))         # site template as extra input:
+# room-2 gate v1 (HINT=0) failed -- leak 0.909, pairSNR 0.1 vs deflate 13.8.
+# Only 2 physical training rooms exist; a template-free net cannot learn to
+# infer an unseen room's static and memorises instead (Run 1-2 redux). The
+# hint is deployment-honest: a base station accumulates it from idle traffic.
 K, C = 114, 228
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
@@ -84,12 +89,15 @@ def morph(static_b, static_a):
 class Pairs(Dataset):
     def __init__(self, groups, statics, seed):
         self.groups, self.statics = groups, statics
+        self.tmpl = [np.mean([statics[r[0]] for r in g], 0).astype(np.float32)
+                     for g in groups]
         w = np.array([len(g) for g in groups], float)
         self.w = w / w.sum()
         self.rng = np.random.default_rng(seed)
     def __len__(self): return 10 ** 9
     def __getitem__(self, _):
-        g = self.groups[self.rng.choice(len(self.groups), p=self.w)]
+        gi_ = self.rng.choice(len(self.groups), p=self.w)
+        g = self.groups[gi_]
         ia, ib = self.rng.choice(len(g), 2, replace=False)
         (ra, na, ioka), (rb, _, _) = g[ia], g[ib]
         s0 = int(self.rng.integers(0, na - WIN + 1))
@@ -102,7 +110,8 @@ class Pairs(Dataset):
         else:
             gi = np.zeros(WIN, np.float32)
         return (torch.from_numpy(x.T), torch.from_numpy(tgt.T),
-                torch.from_numpy(gi), float(ioka))
+                torch.from_numpy(gi), float(ioka),
+                torch.from_numpy(self.tmpl[gi_]))
 
 def make_groups(meta):
     out = []
@@ -116,9 +125,10 @@ def make_groups(meta):
 from asteroid.masknn import TDConvNet
 
 class Sep(nn.Module):
-    def __init__(self, cin=C, nf=512, L=16, S=8):
+    def __init__(self, cin=C, nf=512, L=16, S=8, hint=HINT):
         super().__init__()
-        self.enc = nn.Conv1d(cin, nf, L, stride=S)
+        self.hint = hint
+        self.enc = nn.Conv1d(cin * (1 + hint), nf, L, stride=S)
         try:
             self.masker = TDConvNet(in_chan=nf, n_src=2, out_chan=nf, n_blocks=8,
                                     n_repeats=4, bn_chan=192, hid_chan=512,
@@ -131,9 +141,11 @@ class Sep(nn.Module):
                                     skip_chan=192, mask_act="linear")
             self.causal = False
         self.dec = nn.ConvTranspose1d(nf, cin, L, stride=S)
-    def forward(self, x):                       # x (B, 228, T)
+    def forward(self, x, h=None):               # x (B, 228, T), h (B, 228)
         T = x.shape[-1]
-        e = self.enc(x)
+        xin = torch.cat([x, h.unsqueeze(-1).expand(-1, -1, T)], 1) \
+              if self.hint else x
+        e = self.enc(xin)
         m = self.masker(e)                      # (B, 2, nf, F)
         y = self.dec((m * e.unsqueeze(1)).flatten(0, 1))[..., :T]
         y = y.view(-1, 2, x.shape[1], T)
@@ -201,10 +213,11 @@ def main():
             print(f"NOTICE: horizon changed, cosine rebuilt for {STEPS - step0} steps")
         print(f"resumed from step {step0}", flush=True)
     t0, best, vit = time.time(), math.inf, iter(vl)
-    for step, (x, tgt, gi, ok) in enumerate(dl, start=step0):
+    for step, (x, tgt, gi, ok, h) in enumerate(dl, start=step0):
         if step >= STEPS or (time.time() - t0) / 3600 > HOURS: break
-        x, tgt, gi, ok = (t.to(dev, non_blocking=True) for t in (x, tgt, gi, ok))
-        s, p = model(x)
+        x, tgt, gi, ok, h = (t.to(dev, non_blocking=True)
+                             for t in (x, tgt, gi, ok, h))
+        s, p = model(x, h)
         Lp = neg_snr(p, tgt).mean()
         Lr = route_loss(s, p, gi, ok)
         w = min(1.0, step / max(WARM, 1))
@@ -222,10 +235,11 @@ def main():
             model.eval(); acc = []
             with torch.no_grad():
                 for _ in range(20):
-                    try: vx, vt, vg, vo = next(vit)
-                    except StopIteration: vit = iter(vl); vx, vt, vg, vo = next(vit)
-                    vx, vt, vg, vo = (t.to(dev) for t in (vx, vt, vg, vo))
-                    vs, vp = model(vx)
+                    try: vx, vt, vg, vo, vh = next(vit)
+                    except StopIteration:
+                        vit = iter(vl); vx, vt, vg, vo, vh = next(vit)
+                    vx, vt, vg, vo, vh = (t.to(dev) for t in (vx, vt, vg, vo, vh))
+                    vs, vp = model(vx, vh)
                     acc.append((neg_snr(vp, vt).mean()
                                 + IMUW * route_loss(vs, vp, vg, vo)).item())
             v = float(np.mean(acc)); model.train()
@@ -233,7 +247,7 @@ def main():
             ck = {"model": model.state_dict(), "opt": opt.state_dict(),
                   "sch": sch.state_dict(), "step": step, "steps_total": STEPS,
                   "xpred": True, "cfg": {"DEG": DEG, "WIN": WIN, "IMUW": IMUW,
-                                         "causal": model.causal}}
+                                         "causal": model.causal, "HINT": HINT}}
             torch.save(ck, f"{RUNS}/last.pt")
             if v < best:
                 best = v
