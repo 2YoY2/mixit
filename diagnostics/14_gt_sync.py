@@ -91,7 +91,10 @@ meta = pd.read_csv(f"{OUT}/meta.csv")
 meta["stamp"] = meta.file.str.extract(r"exp-(\d{14})_").astype(np.int64)
 rng = np.random.default_rng(0)
 meta = meta.iloc[rng.permutation(len(meta))]
-offs = np.arange(-SRCH, SRCH + 1e-9, 0.1)
+FIX = os.environ.get("FIX", "")
+offs = np.array([float(FIX)]) if FIX else np.arange(-SRCH, SRCH + 1e-9, 0.1)
+# FIX=<seconds>: score every channel at ONE global offset -- no search, no
+# selection inflation; the honest instrument once the offset is known.
 rows = []
 for r in meta.itertuples():
     if len(rows) >= NREC: break
