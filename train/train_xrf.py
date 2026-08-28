@@ -39,6 +39,8 @@ WARM   = int(os.environ.get("WARM", "2000"))
 SEED   = int(os.environ.get("SEED", "0"))
 NW     = int(os.environ.get("NW", "6"))
 SELF   = int(os.environ.get("SELF", "1"))
+INIT   = os.environ.get("INIT", "")              # warm-start ckpt (model only)
+GROUPBY = os.environ.get("GROUPBY", "scene,rx").split(",")
 C = 264
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
@@ -104,7 +106,7 @@ class Pairs(Dataset):
 
 def make_groups(meta):
     out = []
-    for _, g in meta.groupby(["scene", "rx"]):
+    for _, g in meta.groupby(GROUPBY):
         rows = [(int(r.rid), int(r.nsamp), int(r.imu_ok))
                 for r in g.itertuples() if r.nsamp >= WIN]
         if len(rows) > 1: out.append(rows)
@@ -157,6 +159,8 @@ def route_loss(s, p, imu, ok):
 def main():
     os.makedirs(RUNS, exist_ok=True)
     meta = pd.read_csv(f"{OUT}/meta.csv")
+    if "split" in meta.columns:
+        meta = meta[meta.split == "train"]
     meta = meta[meta.nsamp >= WIN].reset_index(drop=True)
     model = Sep()
     for attempt in range(10):
@@ -180,6 +184,11 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=STEPS)
     step0 = 0
+    if INIT and not os.path.exists(f"{RUNS}/last.pt"):
+        cki = torch.load(os.path.expanduser(INIT), map_location=dev,
+                         weights_only=False)
+        model.load_state_dict(cki["model"])
+        print(f"warm-start from {INIT} (step {cki.get('step')})", flush=True)
     if os.path.exists(f"{RUNS}/last.pt"):
         ck = torch.load(f"{RUNS}/last.pt", map_location=dev, weights_only=False)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
