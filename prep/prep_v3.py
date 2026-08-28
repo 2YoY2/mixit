@@ -32,8 +32,9 @@ Output under $PREP_OUT (default ~/zerdani/buffer/octonet/prep_v3):
   templates.npz          per (node, date) mean static, key "{node}_{date}"
 
 scene: dates <= 20240801 -> 0, 202409xx -> 1, >= 20241029 -> 2.
-split: scene 0 -> train, scenes 1 and 2 -> test (zero-shot rooms; the
-identity cohort lives in the base_subject column).
+split: scenes 0,1 -> train, scene 2 -> test (zero-shot room; the identity
+cohort's ~10 shared people are seen in the training rooms and reappear in
+the held-out one -- the honest cross-environment identity setup).
 
   LIMIT=16 NPROC=4 python3 prep/prep_v3.py       # smoke run
   nohup python3 prep/prep_v3.py > ../log_prep3.txt 2>&1 &
@@ -122,7 +123,7 @@ def one(job):
         scene = 0 if date <= "20240801" else (1 if date < "20241000" else 2)
         row = (rid, f, node, date, scene, subj, subj % 100, act, trial,
                nb, round(rate, 2), round(fill, 4), imu_ok,
-               "train" if scene == 0 else "test")
+               "train" if scene <= 1 else "test")
         return row, y.mean(0)
     except Exception:
         if os.environ.get("DEBUG"):
