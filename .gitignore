@@ -1,0 +1,10 @@
+*.npy
+*.npz
+*.pt
+*.pickle
+*.log
+log_*.txt
+manifest.csv
+__pycache__/
+data/
+runs/
