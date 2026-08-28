@@ -67,7 +67,16 @@ for n in sel:
     T = min(len(amp), len(imu))
     if T < 1000: continue
     Y = feat_energy(amp[:T])
-    Y = Y / (Y.mean(0) + 1e-12)                # per-feature scale norm
+    if os.environ.get("NORM", "static") == "static":
+        # remove the ROOM's statistical property: dyn energy at feature f is
+        # (limb pattern) x |static field at f|^2 to first order -- the room's
+        # ripple is a COMMON multiplicative factor in every limb's footprint,
+        # inflating cross-limb similarity. Divide it out.
+        st = amp[:T].reshape(T, -1).mean(0) ** 2
+        Y = Y / (st + st.mean() * 1e-3)
+        Y = Y / (Y.mean() + 1e-12)
+    else:
+        Y = Y / (Y.mean(0) + 1e-12)            # old per-feature scale norm
     e = envelopes(imu[:T])
     e = e / (e.std(0) + 1e-9)
     act = [i for i in range(5) if e[:, i].std() > 1e-6]
