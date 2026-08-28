@@ -125,6 +125,9 @@ def one(job):
                "train" if scene == 0 else "test")
         return row, y.mean(0)
     except Exception:
+        if os.environ.get("DEBUG"):
+            import traceback
+            traceback.print_exc()
         return None
 
 def main():
