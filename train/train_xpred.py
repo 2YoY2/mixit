@@ -202,6 +202,17 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
     meta = pd.read_csv(f"{OUT}/meta.csv")
     meta = meta[(meta.split == "train") & (meta.nsamp >= WIN)].reset_index(drop=True)
+    # claim the GPU BEFORE the statics build: on unified-memory boxes (GB10)
+    # the ~tens-of-GB cache read fills the page cache and a later cudaMalloc
+    # fails; grabbing the context first (with retries) survives that.
+    model = Sep()
+    for attempt in range(10):
+        try:
+            model = model.to(dev); break
+        except RuntimeError as e:
+            print(f"to({dev}) failed ({str(e)[:60]}) retry {attempt+1}/10 in 60s",
+                  flush=True)
+            time.sleep(60)
     statics = build_statics(meta)
     rng = np.random.default_rng(SEED)
     gkeys = sorted(meta.groupby(["node", "date"]).groups)
@@ -214,7 +225,6 @@ def main():
     dl = DataLoader(Pairs(gtr, statics, SEED), batch_size=B, num_workers=NW,
                     pin_memory=(dev == "cuda"), persistent_workers=NW > 0)
     vl = DataLoader(Pairs(gva, statics, SEED + 1), batch_size=B, num_workers=2)
-    model = Sep().to(dev)
     print(f"causal={model.causal}  params={sum(p.numel() for p in model.parameters())/1e6:.1f}M",
           flush=True)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
