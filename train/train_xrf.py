@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""train_xrf -- cross-prediction separator on prep_xrf streams, carrying the
+three post-mortem upgrades from the failed OctoNet/PA gates:
+
+  SELF-CONDITIONING (replaces both memorisation and the rejected site hint):
+    the input is [x, causal running mean of x] (264+264=528 ch). The room
+    reference is DERIVED FROM THE RECORDING ITSELF at inference -- nothing to
+    memorise, nothing to calibrate. The stress-test failure mode (hallucinating
+    a memorised room) is structurally excluded: the model is trained to read
+    its room off the conditioning channels.
+  OBJECTIVE (unchanged family): private-side SNR against morph-corrected pair
+    targets. Pairs from one (scene, rx) group = same room seen by the same
+    radio, across takes and subjects. Morphs per block: real Chebyshev on the
+    3 amp sub-blocks (30), complex Chebyshev on the 3 island sub-blocks (29).
+  IMU ROUTING with lag-corrected envelopes (prep guarantees alignment; the
+    release's raw alignment is +-0.5-1 s and would have nulled this loss).
+
+  MIXIT_RUNS=~/zerdani/buffer/octonet/xrf_runs nohup python3 train/train_xrf.py &
+"""
+import os, time, math
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
+OUT    = os.path.expanduser(os.environ.get("PREP_OUT", "~/zerdani/buffer/octonet/prep_xrf"))
+RUNS   = os.path.expanduser(os.environ.get("MIXIT_RUNS", "~/zerdani/buffer/octonet/xrf_runs"))
+B      = int(os.environ.get("B", "24"))
+WIN    = int(os.environ.get("WIN", "512"))       # 10.24 s @ 50 Hz; (WIN-16)%8==0
+DEG    = int(os.environ.get("DEG", "6"))
+LR     = float(os.environ.get("LR", "2e-4"))
+STEPS  = int(os.environ.get("STEPS", "40000"))
+HOURS  = float(os.environ.get("HOURS", "2"))
+IMUW   = float(os.environ.get("IMUW", "5.0"))
+SNRMAX = float(os.environ.get("SNRMAX", "30.0"))
+WARM   = int(os.environ.get("WARM", "2000"))
+SEED   = int(os.environ.get("SEED", "0"))
+NW     = int(os.environ.get("NW", "6"))
+SELF   = int(os.environ.get("SELF", "1"))
+C = 264
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(SEED)
+CH30 = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, 30), DEG)
+CH29 = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, 29), DEG)
+
+def morph(sb, sa):
+    """closed-form block morph mapping static_B -> static_A (264 real)."""
+    out = np.empty(C, np.float32)
+    for a in range(3):                                    # amp blocks, real
+        sl = slice(a * 30, (a + 1) * 30)
+        Bm = CH30 * sb[sl][:, None]
+        cf, *_ = np.linalg.lstsq(Bm, sa[sl], rcond=None)
+        out[sl] = Bm @ cf
+    zb = sb[90:177] + 1j * sb[177:264]
+    za = sa[90:177] + 1j * sa[177:264]
+    for a in range(3):                                    # island blocks, complex
+        sl = slice(a * 29, (a + 1) * 29)
+        Bm = CH29 * zb[sl][:, None]
+        cf, *_ = np.linalg.lstsq(Bm, za[sl], rcond=None)
+        fit = Bm @ cf
+        out[90 + sl.start:90 + sl.stop] = fit.real
+        out[177 + sl.start:177 + sl.stop] = fit.imag
+    return out
+
+def build_statics(meta):
+    cachef = f"{OUT}/statics_cache.npz"
+    if os.path.exists(cachef):
+        z = np.load(cachef)
+        if all(str(r) in z for r in meta.rid):
+            return {int(r): z[str(r)] for r in meta.rid}
+    print("building statics cache ...", flush=True)
+    st = {}
+    for i, r in enumerate(meta.itertuples()):
+        st[int(r.rid)] = np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy",
+                                            mmap_mode="r"), np.float32).mean(0)
+        if (i + 1) % 500 == 0: print(f"  {i+1}/{len(meta)}", flush=True)
+    np.savez(cachef, **{str(k): v for k, v in st.items()})
+    return st
+
+class Pairs(Dataset):
+    def __init__(self, groups, statics, seed):
+        self.groups, self.statics = groups, statics
+        w = np.array([len(g) for g in groups], float)
+        self.w = w / w.sum()
+        self.rng = np.random.default_rng(seed)
+    def __len__(self): return 10 ** 9
+    def __getitem__(self, _):
+        g = self.groups[self.rng.choice(len(self.groups), p=self.w)]
+        ia, ib = self.rng.choice(len(g), 2, replace=False)
+        (ra, na, ioka), (rb, _, _) = g[ia], g[ib]
+        s0 = int(self.rng.integers(0, na - WIN + 1))
+        x = np.asarray(np.load(f"{OUT}/streams/{ra:06d}.npy",
+                               mmap_mode="r")[s0:s0 + WIN], np.float32)
+        tgt = x - morph(self.statics[rb], self.statics[ra])[None, :]
+        if ioka:
+            gi = np.asarray(np.load(f"{OUT}/imu/{ra:06d}.npy",
+                                    mmap_mode="r")[s0:s0 + WIN], np.float32).sum(1)
+        else:
+            gi = np.zeros(WIN, np.float32)
+        return (torch.from_numpy(x.T), torch.from_numpy(tgt.T),
+                torch.from_numpy(gi), float(ioka))
+
+def make_groups(meta):
+    out = []
+    for _, g in meta.groupby(["scene", "rx"]):
+        rows = [(int(r.rid), int(r.nsamp), int(r.imu_ok))
+                for r in g.itertuples() if r.nsamp >= WIN]
+        if len(rows) > 1: out.append(rows)
+    return out
+
+from asteroid.masknn import TDConvNet
+class Sep(nn.Module):
+    def __init__(self, cin=C, nf=512, L=16, S=8):
+        super().__init__()
+        self.enc = nn.Conv1d(cin * (1 + SELF), nf, L, stride=S)
+        self.masker = TDConvNet(in_chan=nf, n_src=2, out_chan=nf, n_blocks=8,
+                                n_repeats=4, bn_chan=192, hid_chan=512,
+                                skip_chan=192, mask_act="linear",
+                                causal=True, norm_type="cLN")
+        self.dec = nn.ConvTranspose1d(nf, cin, L, stride=S)
+    def forward(self, x):                        # x (B, 264, T)
+        T = x.shape[-1]
+        if SELF:
+            rm = torch.cumsum(x, -1) / torch.arange(1, T + 1, device=x.device)
+            xin = torch.cat([x, rm], 1)          # causal self-conditioning
+        else:
+            xin = x
+        e = self.enc(xin)
+        y = self.dec((self.masker(e) * e.unsqueeze(1)).flatten(0, 1))[..., :T]
+        y = y.view(-1, 2, x.shape[1], T)
+        res = x - y.sum(1)
+        return y[:, 0], y[:, 1] + res            # room, body (residual->private)
+
+def neg_snr(est, ref):
+    num = ref.pow(2).sum((-2, -1)) + 1e-10
+    den = (ref - est).pow(2).sum((-2, -1)) + 1e-10
+    return -torch.clamp(10 * torch.log10(num / den), max=SNRMAX)
+
+def route_loss(s, p, imu, ok):
+    def env(z):
+        d = z - z.mean(-1, keepdim=True)
+        return F.avg_pool1d(d.pow(2).sum(1, keepdim=True), 16, 8)[:, 0]
+    es, ep = env(s), env(p)
+    gi = F.avg_pool1d(imu.unsqueeze(1), 16, 8)[:, 0]
+    def zs(x):
+        x = x - x.mean(-1, keepdim=True)
+        return x / (x.pow(2).mean(-1, keepdim=True).sqrt() + 1e-8)
+    live = ((es.var(-1) > 1e-12) & (ep.var(-1) > 1e-12)
+            & (gi.var(-1) > 1e-12) & (ok > 0.5))
+    if live.sum() == 0: return s.new_zeros(())
+    rs = (zs(es) * zs(gi)).mean(-1).clamp_min(0)
+    rp = (zs(ep) * zs(gi)).mean(-1).clamp_min(0)
+    return (rs / (rs + rp + 1e-8))[live].mean()
+
+def main():
+    os.makedirs(RUNS, exist_ok=True)
+    meta = pd.read_csv(f"{OUT}/meta.csv")
+    meta = meta[meta.nsamp >= WIN].reset_index(drop=True)
+    model = Sep()
+    for attempt in range(10):
+        try:
+            model = model.to(dev); break
+        except RuntimeError as e:
+            print(f"to({dev}) failed, retry {attempt+1}/10 in 60s", flush=True)
+            time.sleep(60)
+    statics = build_statics(meta)
+    rng = np.random.default_rng(SEED)
+    val_names = set(rng.choice(sorted(meta.name.unique()),
+                               max(4, meta.name.nunique() // 20), replace=False))
+    gtr = make_groups(meta[~meta.name.isin(val_names)])
+    gva = make_groups(meta[meta.name.isin(val_names)])
+    print(f"{len(gtr)} train groups, {len(gva)} val groups | dev={dev} | "
+          f"SELF={SELF} DEG={DEG} IMUW={IMUW} WIN={WIN} B={B}", flush=True)
+    dl = DataLoader(Pairs(gtr, statics, SEED), batch_size=B, num_workers=NW,
+                    pin_memory=(dev == "cuda"), persistent_workers=NW > 0)
+    vl = DataLoader(Pairs(gva, statics, SEED + 1), batch_size=B, num_workers=2)
+    print(f"params={sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
+    opt = torch.optim.Adam(model.parameters(), lr=LR)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=STEPS)
+    step0 = 0
+    if os.path.exists(f"{RUNS}/last.pt"):
+        ck = torch.load(f"{RUNS}/last.pt", map_location=dev, weights_only=False)
+        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
+        step0 = ck["step"]
+        if ck.get("steps_total") == STEPS:
+            sch.load_state_dict(ck["sch"])
+        else:
+            sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=max(STEPS - step0, 1))
+            print("NOTICE: horizon changed, cosine rebuilt")
+        print(f"resumed from step {step0}", flush=True)
+    t0, best, vit = time.time(), math.inf, iter(vl)
+    for step, (x, tgt, gi, ok) in enumerate(dl, start=step0):
+        if step >= STEPS or (time.time() - t0) / 3600 > HOURS: break
+        x, tgt, gi, ok = (t.to(dev, non_blocking=True) for t in (x, tgt, gi, ok))
+        s, p = model(x)
+        Lp = neg_snr(p, tgt).mean()
+        Lr = route_loss(s, p, gi, ok)
+        w = min(1.0, step / max(WARM, 1))
+        loss = Lp + w * IMUW * Lr
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        opt.step(); sch.step()
+        if step % 100 == 0:
+            print(f"[{step}] snr_p {-Lp.item():.2f} dB  route {Lr.item():.3f}  "
+                  f"sRMS {s.pow(2).mean().sqrt().item():.3f} "
+                  f"pRMS {p.pow(2).mean().sqrt().item():.3f}  "
+                  f"lr {sch.get_last_lr()[0]:.2e}  {(time.time()-t0)/3600:.2f}h",
+                  flush=True)
+        if step % 2000 == 0 and step > step0:
+            model.eval(); acc = []
+            with torch.no_grad():
+                for _ in range(20):
+                    try: vx, vt, vg, vo = next(vit)
+                    except StopIteration:
+                        vit = iter(vl); vx, vt, vg, vo = next(vit)
+                    vx, vt, vg, vo = (t.to(dev) for t in (vx, vt, vg, vo))
+                    vs, vp = model(vx)
+                    acc.append((neg_snr(vp, vt).mean()
+                                + IMUW * route_loss(vs, vp, vg, vo)).item())
+            v = float(np.mean(acc)); model.train()
+            print(f"  VAL {v:.4f} {'(best)' if v < best else ''}", flush=True)
+            ck = {"model": model.state_dict(), "opt": opt.state_dict(),
+                  "sch": sch.state_dict(), "step": step, "steps_total": STEPS,
+                  "xrf": True, "cfg": {"DEG": DEG, "WIN": WIN, "IMUW": IMUW,
+                                       "SELF": SELF}}
+            torch.save(ck, f"{RUNS}/last.pt")
+            if v < best:
+                best = v
+                torch.save({"model": model.state_dict(), "step": step, "val": v,
+                            "xrf": True, "cfg": ck["cfg"]}, f"{RUNS}/best.pt")
+    torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
+                "sch": sch.state_dict(), "step": step, "steps_total": STEPS,
+                "xrf": True}, f"{RUNS}/last.pt")
+    print(f"DONE step {step}, {(time.time()-t0)/3600:.2f} h, best val {best:.4f}",
+          flush=True)
+
+if __name__ == "__main__":
+    main()
