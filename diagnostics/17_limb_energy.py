@@ -125,6 +125,20 @@ for n in sel:
         Y = Y / (Y.mean(0) + 1e-12)            # old per-feature scale norm
     e = envelopes(imu[:T])
     e = e / (e.std(0) + 1e-9)
+    if os.environ.get("LAG", "1") == "1":
+        # the release is only coarsely aligned (measured: median +0.4 s offset,
+        # IQR -0.2..+0.8 s, 5% within 0.1 s). One clock offset per recording:
+        # estimate from TOTAL motion (unbiased wrt limbs), shift, then attribute.
+        ec = Y.sum(1); ec = (ec - ec.mean()) / (ec.std() + 1e-9)
+        ei = e.sum(1); ei = (ei - ei.mean()) / (ei.std() + 1e-9)
+        L = 75
+        cc = [float((ec[max(0, -l):T - max(0, l)]
+                     * ei[max(0, l):T - max(0, -l)]).mean())
+              for l in range(-L, L + 1)]
+        l = int(np.argmax(cc)) - L
+        if l > 0:   e, Y = e[l:], Y[:T - l]
+        elif l < 0: e, Y = e[:T + l], Y[-l:]
+        T = len(e)
     act = [i for i in range(5) if e[:, i].std() > 1e-6]
     if len(act) < 2: continue
     used += 1
