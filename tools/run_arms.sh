@@ -40,12 +40,12 @@ PREP_OUT=$D/prep_pa400 MIXIT_RUNS=$D/pa400_scratch_runs WIN=1024 STEPS=40000 HOU
   python3 train/train_xpred.py > "$D/log_arm1.txt" 2>&1
 log "arm1 done"
 
-log "phase 3: arm2 PA-75 warm-start"
-PREP_OUT=$D/prep_pa75 MIXIT_RUNS=$D/pa75_warm_runs INIT=$D/xpred75_runs/best.pt \
-  WIN=256 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm2.txt" 2>&1
+log "phase 3: arm2 PA-75 warm-start (fine-tune LR)"
+PREP_OUT=$D/prep_pa75 MIXIT_RUNS=$D/pa75_ft_runs INIT=$D/xpred75_runs/best.pt \
+  LR=5e-5 WIN=256 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm2.txt" 2>&1
 log "arm2 done"
 
-log "phase 3: arm3 PA-400 warm-start"
-PREP_OUT=$D/prep_pa400 MIXIT_RUNS=$D/pa400_warm_runs INIT=$D/xpred75_runs/best.pt \
-  WIN=1024 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm3.txt" 2>&1
+log "phase 3: arm3 PA-400 warm-start (fine-tune LR)"
+PREP_OUT=$D/prep_pa400 MIXIT_RUNS=$D/pa400_ft_runs INIT=$D/xpred75_runs/best.pt \
+  LR=5e-5 WIN=1024 STEPS=30000 HOURS=2 python3 train/train_xpred.py > "$D/log_arm3.txt" 2>&1
 log "arm3 done -- all arms trained; next: eval_xpred on prep_pa400 and prep_pa75"
