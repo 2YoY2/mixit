@@ -98,7 +98,7 @@ def one(job):
         nb = int(dur * FS)
         y, fill = bin_mean(t, amp.reshape(len(amp), -1), nb)
         if fill > 0.35: return None
-        y /= max(float(np.sqrt((y ** 2).mean())), 1e-12)
+        y = y / max(float(np.sqrt((y ** 2).mean())), 1e-12)
         np.save(f"{OUT}/streams/{rid:06d}.npy", y.astype(np.float16))
         stamp, node = int(m.group(1)), int(m.group(2))
         subj, act, trial = int(m.group(3)), m.group(4), int(m.group(5))
