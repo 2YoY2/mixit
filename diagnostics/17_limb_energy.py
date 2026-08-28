@@ -75,16 +75,43 @@ for n in sel:
         # exactly; the spatial pattern survives.
         rms = np.sqrt((amp ** 2).mean(axis=(2, 3), keepdims=True)) + 1e-9
         amp = amp / rms
-    Y = feat_energy(amp)
+    CLEAN = os.environ.get("CLEAN", "1") == "1"
+    if CLEAN:
+        # Hampel: impulse outliers (interference bursts, firmware glitches)
+        from scipy.ndimage import median_filter
+        a2 = amp.reshape(T, -1)
+        med = median_filter(a2, size=(31, 1))
+        dev = np.abs(a2 - med)
+        mad = median_filter(dev, size=(31, 1)) * 1.4826 + 1e-9
+        a2 = np.where(dev > 3 * mad, med, a2)
+        amp = a2.reshape(amp.shape)
+    st_amp = amp.reshape(T, -1).mean(0)
+    snr_w = st_amp / (st_amp + np.percentile(st_amp, 25))   # damp weak features
+    def dyn_pca(F, k=20):
+        hp = F - uniform_filter1d(F, SM, axis=0)
+        if not CLEAN: return hp
+        m = hp.mean(0); hpc = hp - m
+        U, S, Vt = np.linalg.svd(hpc, full_matrices=False)
+        return (U[:, :k] * S[:k]) @ Vt[:k] + m                # signal subspace only
+    hp_a = dyn_pca(amp.reshape(T, -1)) * snr_w[None, :]
+    Y = uniform_filter1d(hp_a ** 2, SM, axis=0)
     if pha is not None:
-        # phase-structure energy: islands (adjacent-subcarrier conj, CFO-free)
-        # on the AGC-cleaned complex; dynamic energy of re+im per feature.
         c = amp * np.exp(1j * pha[:T])
-        z = (c[..., :-1] * np.conj(c[..., 1:])).reshape(T, -1)
+        z = c[..., :-1] * np.conj(c[..., 1:])                # (T,3,3,29) CFO-free
+        if CLEAN:
+            # SFO/PDD residual: per-packet per-antenna common rotation of the
+            # island -- remove it or it injects common-mode "energy" everywhere
+            u = z / (np.abs(z) + 1e-12)
+            phi = np.angle(u.mean(-1, keepdims=True))
+            z = z * np.exp(-1j * phi)
+        z = z.reshape(T, -1)
+        zw = np.sqrt(snr_w.reshape(3, 3, 30)[..., :-1].reshape(-1)
+                     * snr_w.reshape(3, 3, 30)[..., 1:].reshape(-1))
         zr = np.c_[z.real, z.imag]
-        hp = zr - uniform_filter1d(zr, SM, axis=0)
-        ph_e = uniform_filter1d(hp[:, :z.shape[1]] ** 2
-                                + hp[:, z.shape[1]:] ** 2, SM, axis=0)
+        hp_z = dyn_pca(zr)
+        ph_e = uniform_filter1d((hp_z[:, :z.shape[1]] ** 2
+                                 + hp_z[:, z.shape[1]:] ** 2) * zw[None, :] ** 2,
+                                SM, axis=0)
         Y = np.c_[Y, ph_e]
     if os.environ.get("NORM", "static") == "static":
         # remove the ROOM's statistical property: dyn energy at feature f is
