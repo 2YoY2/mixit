@@ -155,23 +155,27 @@ def one_rid(job):
         li, lj = int(order[0]), int(order[1])
         c12 = corr(G[:, li], G[:, lj])
         if not np.isfinite(c12) or abs(c12) > MAXCORR: return None
-        F = np.c_[np.cos(toks[:, 2]), np.sin(toks[:, 2]),
-                  np.cos(toks[:, 3]), np.sin(toks[:, 3]),
-                  toks[:, 1] / 150.0]
+        F_full = np.c_[np.cos(toks[:, 2]), np.sin(toks[:, 2]),
+                       np.cos(toks[:, 3]), np.sin(toks[:, 3]),
+                       toks[:, 1] / 150.0]
+        F_dopp = toks[:, 1:2] / 150.0                    # ablation: STFT only
         wgt = np.sqrt(toks[:, 4])
-        a = kmeans2(F, wgt)
-        E = np.zeros((2, nw))
-        for k in (0, 1):
-            for w, e in zip(toks[a == k, 0].astype(int), toks[a == k, 4]):
-                E[k, w] += e
-        if E[0].std() < 1e-12 or E[1].std() < 1e-12: return None
-        def score(Gm):
-            p1 = np.nanmean([corr(E[0], Gm[:, li]), corr(E[1], Gm[:, lj])])
-            p2 = np.nanmean([corr(E[0], Gm[:, lj]), corr(E[1], Gm[:, li])])
-            return (max(p1, p2), min(p1, p2))
-        m, x = score(G)
-        mn, _ = score(np.roll(G, nw // 2, 0))
-        return DEV[li], DEV[lj], c12, m, x, mn
+        out = []
+        for F in (F_full, F_dopp):
+            a = kmeans2(F, wgt)
+            E = np.zeros((2, nw))
+            for k in (0, 1):
+                for w, e in zip(toks[a == k, 0].astype(int), toks[a == k, 4]):
+                    E[k, w] += e
+            if E[0].std() < 1e-12 or E[1].std() < 1e-12: return None
+            def score(Gm):
+                p1 = np.nanmean([corr(E[0], Gm[:, li]), corr(E[1], Gm[:, lj])])
+                p2 = np.nanmean([corr(E[0], Gm[:, lj]), corr(E[1], Gm[:, li])])
+                return (max(p1, p2), min(p1, p2))
+            m, x = score(G)
+            mn, _ = score(np.roll(G, nw // 2, 0))
+            out += [m, x, mn]
+        return (DEV[li], DEV[lj], c12) + tuple(out)
     except Exception:
         return None
 
@@ -190,15 +194,20 @@ for prep in PREPS:
                 if len(res) >= NRID: break
     print(f"\n== {os.path.basename(prep)}: {len(res)} scored / {tried} tried")
     if not res: continue
-    M = np.array([r[3] for r in res]); Xc = np.array([r[4] for r in res])
-    N = np.array([r[5] for r in res])
-    pairs = pd.Series([f"{r[0]}+{r[1]}" for r in res]).value_counts()
-    print(f"  limb pairs: {dict(pairs.head(6))}")
-    print(f"  matched  corr: median {np.nanmedian(M):+.3f}")
-    print(f"  wrong-perm   : median {np.nanmedian(Xc):+.3f}   "
-          f"(gap {np.nanmedian(M - Xc):+.3f})")
-    print(f"  rolled null  : median {np.nanmedian(N):+.3f}")
-    print(f"  matched>null on {np.mean(M > N) * 100:.0f}% of recordings")
+    pair = np.array(["+".join(sorted((r[0], r[1]))) for r in res])
+    A = np.array([r[3:] for r in res], float)  # mF xF nF mD xD nD
+    for nm, o in (("full tokens (Doppler+phi+psi)", 0), ("Doppler-only", 3)):
+        M, Xc, N = A[:, o], A[:, o + 1], A[:, o + 2]
+        print(f"  [{nm}] matched {np.nanmedian(M):+.3f}  "
+              f"wrong-perm {np.nanmedian(Xc):+.3f}  "
+              f"null {np.nanmedian(N):+.3f}  win {np.mean(M > N)*100:.0f}%")
+    print("  per-pair (n>=6): full-token matched/null/win | dopp-only win")
+    for p in pd.Series(pair).value_counts().index:
+        m = pair == p
+        if m.sum() < 6: continue
+        print(f"    {p:6s} n={m.sum():3d}: {np.nanmedian(A[m, 0]):+.3f}/"
+              f"{np.nanmedian(A[m, 2]):+.3f}/{np.mean(A[m, 0] > A[m, 2])*100:3.0f}%"
+              f" | {np.mean(A[m, 3] > A[m, 5])*100:3.0f}%")
 print("""
 READ: matched >> null -> clusters track LIMB MOTION (not noise).
 matched-minus-wrong-perm gap >> 0 -> the two clusters are DIFFERENT limbs,
