@@ -168,6 +168,14 @@ for _ in range(NPAIR):
                                     / max(((tgt - p) ** 2).sum(), 1e-12)))
         leak[a].append(corr(per[a]["pstat"][ra], per[a]["pstat"][rb]))
 
+if any(LIMBROWS[i]["own"] for i in range(5)):
+    print("\nlimb routing on UNSEEN rooms (median r: own slot / other slots / room slot):")
+    for i, d in enumerate(["LW", "RW", "LP", "RP", "HD"]):
+        R = LIMBROWS[i]
+        if R["own"]:
+            print(f"  {d}: {np.nanmedian(R['own']):+.3f} / "
+                  f"{np.nanmedian(R['cross']):+.3f} / {np.nanmedian(R['room']):+.3f}"
+                  f"  (n={len(R['own'])})")
 print(f"\nstress hp-room (model): median {np.median(hp_room):.3f}  "
       f"-- low = adaptive, high = memorised room\n")
 print(f"{'arm':9s}{'pairSNR':>9s}{'leak':>8s}{'psf':>7s}")
