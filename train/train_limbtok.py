@@ -199,8 +199,9 @@ def main():
                 lp = pit_loss(a, torch.from_numpy(widx).to(dev),
                               torch.from_numpy(e).to(dev), nw, G)
                 if lp is not None: loss = loss + PITW * lp; npit += 1
-        # MixIT stream
+        # MixIT stream -- all pairs through ONE padded forward
         nmix = 0
+        pairs = []
         for _ in range(BM):
             node = list(bynode)[rng.integers(len(bynode))]
             ra, rb = rng.choice(bynode[node], 2, replace=False)
@@ -211,12 +212,20 @@ def main():
             le = X[:, 6]                      # re-z-score energy over union
             X[:, 6] = (le - le.mean()) / (le.std() + 1e-6)
             org = np.r_[np.ones(len(Xa)), np.zeros(len(Xb))].astype(np.float32)
-            Xt = torch.from_numpy(X)[None].to(dev)
-            a = model(Xt, torch.zeros(1, len(X), dtype=torch.bool, device=dev))[0]
-            loss = loss + MIXW * mixit_loss(
-                a, torch.from_numpy(np.r_[ea, eb]).to(dev),
-                torch.from_numpy(org).to(dev))
-            nmix += 1
+            pairs.append((X, org, np.r_[ea, eb]))
+        if pairs:
+            n = max(len(p[0]) for p in pairs)
+            Xb_ = torch.zeros(len(pairs), n, 7)
+            msk = torch.ones(len(pairs), n, dtype=torch.bool)
+            for k, p in enumerate(pairs):
+                Xb_[k, :len(p[0])] = torch.from_numpy(p[0])
+                msk[k, :len(p[0])] = False
+            Am = model(Xb_.to(dev), msk.to(dev))
+            for k, (Xp, org, ee) in enumerate(pairs):
+                loss = loss + MIXW * mixit_loss(
+                    Am[k, :len(Xp)], torch.from_numpy(ee).to(dev),
+                    torch.from_numpy(org).to(dev))
+                nmix += 1
         if npit + nmix == 0: continue
         loss = loss / max(npit + nmix, 1)
         opt.zero_grad(); loss.backward()
