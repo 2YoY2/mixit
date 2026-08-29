@@ -35,6 +35,9 @@ STEPS  = int(os.environ.get("STEPS", "40000"))
 HOURS  = float(os.environ.get("HOURS", "2"))
 IMUW   = float(os.environ.get("IMUW", "10.0"))   # body-level routing weight
 LIMBW  = float(os.environ.get("LIMBW", "10.0"))  # per-limb assignment weight
+SPW    = float(os.environ.get("SPW", "1.0"))     # per-slot norm penalty (Prop 4:
+# the sum is constrained, individual slots are not -- without this they balloon
+# into mutually-cancelling giants; observed coreRMS 6x at step 15k)
 SNRMAX = float(os.environ.get("SNRMAX", "30.0"))
 WARM   = int(os.environ.get("WARM", "2000"))
 SEED   = int(os.environ.get("SEED", "0"))
@@ -266,8 +269,9 @@ def main():
         s, p = y[:, 0], y[:, 1:].sum(1)
         Lp = neg_snr(p, tgt).mean()
         Lb, Ll = route_loss(y, gi, ok)
+        Ls = y[:, 1:].pow(2).mean((-2, -1)).clamp_min(1e-12).sqrt().mean()
         w = min(1.0, step / max(WARM, 1))
-        loss = Lp + w * (IMUW * Lb + LIMBW * Ll)
+        loss = Lp + w * (IMUW * Lb + LIMBW * Ll) + SPW * Ls
         opt.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         opt.step(); sch.step()
