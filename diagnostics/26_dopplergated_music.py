@@ -15,16 +15,20 @@ P_f(phi,psi).  Outputs per clip:
          free laterality scalar (could transfer across rooms)
 Battery: dphi table per (room,act,rx) + prototype/within/LORO on the map.
 
-  CLIPKEY=1-1-1 python3 diagnostics/26_dopplergated_music.py
+  CLIPKEY=1-1-1 python3 diagnostics/26_dopplergated_music.py   # fast
+  NCAP=60 NPROC=6 python3 diagnostics/26_dopplergated_music.py # scaled
 """
 import os, glob, re
+from multiprocessing import Pool
 import numpy as np
 import h5py
 
 ROOT = os.path.expanduser(os.environ.get("ROOT", "~/zerdani/buffer/PerceptAlign"))
 SCENES = [int(s) for s in os.environ.get("SCENES", "1,4,5").split(",")]
 ACTS = [int(a) for a in os.environ.get("ACTS", "1,2").split(",")]
-CLIPKEY = os.environ.get("CLIPKEY", "1-1-1")
+CLIPKEY = os.environ.get("CLIPKEY", "")      # empty = all clip dirs
+NCAP = int(os.environ.get("NCAP", "60"))     # clips per (room, act)
+NPROC = int(os.environ.get("NPROC", "6"))
 FS, WINF, HOPF = 400.0, 256, 128
 L, NPH, NPS = 20, 49, 49
 TORSO = tuple(float(v) for v in os.environ.get("TORSO", "2,8").split(","))
@@ -122,35 +126,55 @@ def ridge_acc(Xtr, ytr, Xte, yte):
     a = np.linalg.solve(G @ G.T + LAM * np.eye(len(G)), ytr)
     return float((np.sign(((Xte - mu) / sd) @ (G.T @ a)) == yte).mean())
 
+def one_clip(job):
+    sc, act, g = job
+    maps, dp = [], []
+    for rx in (1, 2, 3):
+        try:
+            yb = read_products(g[rx])
+            r = doppler_music(yb) if yb is not None else None
+        except Exception:
+            r = None
+        if r is None or not np.isfinite([r[1], r[2]]).all(): return None
+        maps.append(r[0])
+        d = r[2] - r[1]                                # hand minus torso angle
+        dp.append(np.arctan2(np.sin(d), np.cos(d)))
+    return sc, act, np.concatenate(maps), np.array(dp)
+
 rng = np.random.default_rng(0)
-X, y, DPHI = {}, {}, {}
+jobs = []
 for sc in SCENES:
-    rows, labs = [], []
     for act in ACTS:
         bytake = {}
+        pat = CLIPKEY if CLIPKEY else "*"
         for f in sorted(glob.glob(f"{ROOT}/Scene{sc}/user*/action{act}/"
-                                  f"{CLIPKEY}/csi_mat/*.mat")):
-            mm = re.search(r"user(\d+)/action\d+/[^/]+/csi_mat/(\d+)-r(\d)\.mat", f)
+                                  f"{pat}/csi_mat/*.mat")):
+            mm = re.search(r"user(\d+)/action\d+/([^/]+)/csi_mat/(\d+)-r(\d)\.mat", f)
             if mm:
-                bytake.setdefault((mm.group(1), mm.group(2)), {})[
-                    int(mm.group(3))] = f
-        for key in sorted(bytake):
-            g = bytake[key]
-            if set(g) != {1, 2, 3}: continue
-            maps, dp = [], []
-            for rx in (1, 2, 3):
-                yb = read_products(g[rx])
-                r = doppler_music(yb) if yb is not None else None
-                if r is None: break
-                maps.append(r[0])
-                d = r[2] - r[1]                        # hand minus torso angle
-                dp.append(np.arctan2(np.sin(d), np.cos(d)))
-            if len(maps) == 3:
-                rows.append(np.concatenate(maps)); labs.append(act)
-                DPHI.setdefault((sc, act), []).append(dp)
+                bytake.setdefault((mm.group(1), mm.group(2), mm.group(3)), {})[
+                    int(mm.group(4))] = f
+        keys = [k for k in sorted(bytake) if set(bytake[k]) == {1, 2, 3}]
+        if len(keys) > NCAP:
+            keys = [keys[i] for i in rng.permutation(len(keys))[:NCAP]]
+        jobs += [(sc, act, bytake[k]) for k in keys]
+print(f"{len(jobs)} clips ({NPROC} workers)", flush=True)
+X, y, DPHI, DP = {}, {}, {}, {}
+acc_rows = {sc: ([], [], []) for sc in SCENES}         # sigs, labs, dphis
+with Pool(NPROC) as pool:
+    for i, r in enumerate(pool.imap_unordered(one_clip, jobs, chunksize=2)):
+        if r is not None:
+            sc, act, sig, dp = r
+            acc_rows[sc][0].append(sig); acc_rows[sc][1].append(act)
+            acc_rows[sc][2].append(dp)
+            DPHI.setdefault((sc, act), []).append(dp)
+        if (i + 1) % 50 == 0: print(f"  {i+1}/{len(jobs)}", flush=True)
+for sc in SCENES:
+    rows, labs, dps = acc_rows[sc]
     if not rows: continue
     X[sc] = np.array(rows)
     y[sc] = np.where(np.array(labs) == ACTS[0], 1.0, -1.0)
+    D = np.array(dps)
+    DP[sc] = np.concatenate([np.sin(D), np.cos(D)], 1)  # (n, 6) dphi features
     n0 = int((y[sc] > 0).sum())
     print(f"room {sc}: n={n0}/{len(labs) - n0}", flush=True)
 rooms = sorted(X)
@@ -177,20 +201,25 @@ print("      " + "".join(f"{l:>8s}" for l in labs2))
 for i, l in enumerate(labs2):
     print(f"{l:>6s}" + "".join(f"{cm[i, j]:8.3f}" for j in range(len(labs2))))
 
-print("B) within-room 70/30:")
+print("B) within-room 70/30 (map | dphi-only):")
 for sc in rooms:
     ix = rng.permutation(len(y[sc])); k = int(len(ix) * 0.7)
     if k < 2 or len(ix) - k < 2: print(f"  room {sc}: n too small"); continue
-    print(f"  room {sc}: acc {ridge_acc(X[sc][ix[:k]], y[sc][ix[:k]], X[sc][ix[k:]], y[sc][ix[k:]]):.3f}")
+    am = ridge_acc(X[sc][ix[:k]], y[sc][ix[:k]], X[sc][ix[k:]], y[sc][ix[k:]])
+    ad = ridge_acc(DP[sc][ix[:k]], y[sc][ix[:k]], DP[sc][ix[k:]], y[sc][ix[k:]])
+    print(f"  room {sc}: map {am:.3f}   dphi {ad:.3f}")
 
-print("C) leave-one-room-out vs shuffle null:")
+print("C) leave-one-room-out (map | dphi-only) vs shuffle null:")
 for sc in rooms:
     tr = [r for r in rooms if r != sc]
     Xt = np.concatenate([X[r] for r in tr]); yt = np.concatenate([y[r] for r in tr])
+    Dt = np.concatenate([DP[r] for r in tr])
     acc = ridge_acc(Xt, yt, X[sc], y[sc])
+    acd = ridge_acc(Dt, yt, DP[sc], y[sc])
     nul = np.mean([ridge_acc(Xt, rng.permutation(yt), X[sc], y[sc])
                    for _ in range(NSH)])
-    print(f"  test room {sc}: acc {acc:.3f}   shuffle-null {nul:.3f}")
+    print(f"  test room {sc}: map {acc:.3f}   dphi {acd:.3f}   "
+          f"shuffle-null {nul:.3f}")
 
 print("""
 READ: E is the money row -- if act1 vs act2 dphi separates (gap > spread,
