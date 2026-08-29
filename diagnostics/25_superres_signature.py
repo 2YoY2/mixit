@@ -116,10 +116,11 @@ def music_sig(y):
     return lp - lp.mean(), phi
 
 def ridge_acc(Xtr, ytr, Xte, yte):
+    # dual form: identical solution, n x n instead of d x d (d ~ 14k here)
     mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-9
     G = (Xtr - mu) / sd
-    B = np.linalg.solve(G.T @ G + LAM * np.eye(G.shape[1]), G.T @ ytr)
-    return float((np.sign(((Xte - mu) / sd) @ B) == yte).mean())
+    a = np.linalg.solve(G @ G.T + LAM * np.eye(len(G)), ytr)
+    return float((np.sign(((Xte - mu) / sd) @ (G.T @ a)) == yte).mean())
 
 rng = np.random.default_rng(0)
 X, y, PHI = {}, {}, {}
