@@ -51,6 +51,11 @@ GROUPBY = os.environ.get("GROUPBY", "scene,rx").split(",")
 ADIR   = os.environ.get("ANCHORDIR", "imu")      # anchor modality A/B: imu | imu_pose
 METAF  = os.environ.get("META", "meta.csv")
 ARCH   = os.environ.get("ARCH", "conv")          # conv | pi (permutation-invariant)
+CMN    = int(os.environ.get("CMN", "1"))         # CMN-form front-end: divide the
+# recording's OWN static out of the input. The room's spatial pattern is
+# removed from the signal (not appended beside it) -- unparrotable, and the
+# multipath pattern physically cannot reach the weights. Speech's cepstral
+# mean normalisation / comms' equalisation, applied to amp + complex islands.
 C = 264
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
@@ -139,6 +144,22 @@ class Pairs(Dataset):
             sc = 1.0 / max(float(np.sqrt((x ** 2).mean())), 1e-12)
             x, sa, sb = x * sc, sa * sc, sb * sc
         tgt = x - morph(sb, sa)[None, :]
+        if CMN:
+            aa = np.abs(sa[:90])
+            ga_ = np.maximum(aa, 0.05 * np.median(aa) + 1e-9)
+            zb_ = sa[90:177] + 1j * sa[177:264]
+            gz = np.abs(zb_)
+            thr = 0.05 * np.median(gz) + 1e-9
+            zb_ = np.where(gz < thr, thr + 0j, zb_)
+            def nm(v, shift):
+                va = v[..., :90] / ga_
+                vz = (v[..., 90:177] + 1j * v[..., 177:264]) / zb_
+                if shift:
+                    va = va - 1.0
+                    vz = vz - 1.0
+                return np.concatenate([va, vz.real, vz.imag], -1).astype(np.float32)
+            tgt = nm(tgt, False)
+            x = nm(x, True)
         if ioka:
             gi = np.asarray(np.load(f"{OUT}/{ADIR}/{ra:06d}.npy",
                                     mmap_mode="r")[s0:s0 + WIN], np.float32)
@@ -352,7 +373,7 @@ def main():
                   "xrf": True, "cfg": {"DEG": DEG, "WIN": WIN, "IMUW": IMUW,
                                        "LIMBW": LIMBW, "SELF": SELF,
                                        "LIMB": LIMB, "M": M, "AUG": AUG,
-                                       "ARCH": ARCH}}
+                                       "ARCH": ARCH, "CMN": CMN}}
             torch.save(ck, f"{RUNS}/last.pt")
             if v < best:
                 best = v

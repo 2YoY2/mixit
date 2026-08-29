@@ -27,6 +27,7 @@ assert ck.get("xrf"), "not a train_xrf checkpoint"
 DEG, SELF = ck["cfg"]["DEG"], ck["cfg"].get("SELF", 1)
 M = ck["cfg"].get("M", 2)
 LIMB = int(ck["cfg"].get("LIMB", 0)) and M > 2
+CMN = int(ck["cfg"].get("CMN", 0))
 CH30 = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, 30), DEG)
 CH29 = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, 29), DEG)
 print(f"ckpt {CKPT} step {ck['step']} val {ck.get('val')} cfg {ck['cfg']} dev={dev}")
@@ -120,10 +121,35 @@ statics = {int(r.rid): np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy",
 tmpl = {k: np.mean([statics[int(r)] for r in g.rid], 0)
         for k, g in meta.groupby(["node", "date"])}
 
-def arms(x, key):
+def cmn_maps(sa):
+    aa = np.abs(sa[:90])
+    ga_ = np.maximum(aa, 0.05 * np.median(aa) + 1e-9)
+    zb_ = sa[90:177] + 1j * sa[177:264]
+    gz = np.abs(zb_)
+    thr = 0.05 * np.median(gz) + 1e-9
+    zb_ = np.where(gz < thr, thr + 0j, zb_)
+    def nm(v, shift):
+        va = v[..., :90] / ga_
+        vz = (v[..., 90:177] + 1j * v[..., 177:264]) / zb_
+        if shift: va = va - 1.0; vz = vz - 1.0
+        return np.concatenate([va, vz.real, vz.imag], -1).astype(np.float32)
+    def dn(v):
+        va = v[..., :90] * ga_
+        vz = (v[..., 90:177] + 1j * v[..., 177:264]) * zb_
+        return np.concatenate([va, vz.real, vz.imag], -1).astype(np.float32)
+    return nm, dn
+
+def arms(x, key, sa):
+    xin = x
+    nm = dn = None
+    if CMN:
+        nm, dn = cmn_maps(sa)
+        xin = nm(x, True)
     with torch.no_grad():
-        y = net(torch.from_numpy(x.T[None]).to(dev))[0].cpu().numpy()
-    s, p = y[0].T, y[1:].sum(0).T
+        y = net(torch.from_numpy(xin.T[None]).to(dev))[0].cpu().numpy()
+    p = y[1:].sum(0).T
+    if CMN: p = dn(p)
+    s = x - p
     t = tmpl[key]
     fit = morph(t, x.mean(0))
     return {"model": (s, p), "trivial": (np.broadcast_to(t, x.shape), x - t),
@@ -143,11 +169,12 @@ for r in meta.itertuples():
         ma = pd.DataFrame(x).rolling(w, center=True, min_periods=1).mean() \
                .to_numpy(np.float32)
         xh = x - ma
+        xh_in = cmn_maps(statics[int(r.rid)])[0](xh, False) if CMN else xh
         with torch.no_grad():
-            yh = net(torch.from_numpy(xh.T[None]).to(dev))
+            yh = net(torch.from_numpy(xh_in.T[None]).to(dev))
         hp_room.append(float((yh[0, 0].cpu().numpy() ** 2).mean()
-                             / max((xh ** 2).mean(), 1e-12)))
-    armd, yfull = arms(x, key)
+                             / max((xh_in ** 2).mean(), 1e-12)))
+    armd, yfull = arms(x, key, statics[int(r.rid)])
     for a, (s, p) in armd.items():
         per[a]["psf"].append(sfrac(p))
         per[a]["pstat"][int(r.rid)] = p.mean(0)
@@ -192,7 +219,7 @@ for _ in range(NPAIR):
     T = len(xa) - ((len(xa) - 16) % 8)
     xa = xa[:T]
     tgt = xa - morph(statics[rb], statics[ra])[None, :]
-    for a, (s, p) in arms(xa, k)[0].items():
+    for a, (s, p) in arms(xa, k, statics[ra])[0].items():
         snr[a].append(10 * np.log10(max((tgt ** 2).sum(), 1e-12)
                                     / max(((tgt - p) ** 2).sum(), 1e-12)))
         leak[a].append(corr(per[a]["pstat"][ra], per[a]["pstat"][rb]))
