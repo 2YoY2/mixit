@@ -112,8 +112,12 @@ def corr(a, b):
     if a.std() < 1e-12 or b.std() < 1e-12: return np.nan
     return float(np.corrcoef(a, b)[0, 1])
 
+SPLITEVAL = os.environ.get("SPLITEVAL", "test")
+MAXR = int(os.environ.get("MAXR", "0"))
 meta = pd.read_csv(f"{OUT}/meta.csv")
-meta = meta[(meta.split == "test") & (meta.nsamp >= MINN)].reset_index(drop=True)
+meta = meta[(meta.split == SPLITEVAL) & (meta.nsamp >= MINN)].reset_index(drop=True)
+if MAXR and len(meta) > MAXR:
+    meta = meta.sample(MAXR, random_state=0).reset_index(drop=True)
 print(f"{len(meta)} test recordings, scenes {sorted(meta.scene.unique())}")
 statics = {int(r.rid): np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy",
                                           mmap_mode="r"), np.float32).mean(0)
