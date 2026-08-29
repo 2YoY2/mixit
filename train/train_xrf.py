@@ -48,6 +48,8 @@ AUG    = int(os.environ.get("AUG", "0"))         # user rule: no augmentation
 M      = 2 + (5 if LIMB else 0)
 INIT   = os.environ.get("INIT", "")              # warm-start ckpt (model only)
 GROUPBY = os.environ.get("GROUPBY", "scene,rx").split(",")
+ADIR   = os.environ.get("ANCHORDIR", "imu")      # anchor modality A/B: imu | imu_pose
+METAF  = os.environ.get("META", "meta.csv")
 C = 264
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
@@ -137,7 +139,7 @@ class Pairs(Dataset):
             x, sa, sb = x * sc, sa * sc, sb * sc
         tgt = x - morph(sb, sa)[None, :]
         if ioka:
-            gi = np.asarray(np.load(f"{OUT}/imu/{ra:06d}.npy",
+            gi = np.asarray(np.load(f"{OUT}/{ADIR}/{ra:06d}.npy",
                                     mmap_mode="r")[s0:s0 + WIN], np.float32)
             # residualize each limb's envelope against the other four: raw
             # envelopes are heavily collinear (whole-body motion), which makes
@@ -230,7 +232,7 @@ def route_loss(y, imu6, ok):
 
 def main():
     os.makedirs(RUNS, exist_ok=True)
-    meta = pd.read_csv(f"{OUT}/meta.csv")
+    meta = pd.read_csv(f"{OUT}/{METAF}")
     if "split" in meta.columns:
         meta = meta[meta.split == "train"]
     meta = meta[meta.nsamp >= WIN].reset_index(drop=True)
