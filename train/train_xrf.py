@@ -139,8 +139,19 @@ class Pairs(Dataset):
         if ioka:
             gi = np.asarray(np.load(f"{OUT}/imu/{ra:06d}.npy",
                                     mmap_mode="r")[s0:s0 + WIN], np.float32)
-        else:
-            gi = np.zeros((WIN, 5), np.float32)
+            # residualize each limb's envelope against the other four: raw
+            # envelopes are heavily collinear (whole-body motion), which makes
+            # the limbs-x-slots assignment weakly identified -- probe 17's
+            # measured fix, applied to the anchors the loss consumes.
+            g2 = gi.copy()
+            for i_ in range(5):
+                oth = [j for j in range(5) if j != i_]
+                A_ = np.c_[gi[:, oth], np.ones(len(gi), np.float32)]
+                beta, *_ = np.linalg.lstsq(A_, gi[:, i_], rcond=None)
+                g2[:, i_] = np.clip(gi[:, i_] - A_ @ beta, 0, None)
+            gi = np.c_[gi.sum(1), g2]        # ch0 = raw total (body term),
+        else:                                 # ch1..5 = residualized limbs
+            gi = np.zeros((WIN, 6), np.float32)
         return (torch.from_numpy(x.T), torch.from_numpy(tgt.T),
                 torch.from_numpy(gi.T), float(ioka))
 
@@ -191,13 +202,13 @@ def _zs(x):
     x = x - x.mean(-1, keepdim=True)
     return x / (x.pow(2).mean(-1, keepdim=True).sqrt() + 1e-8)
 
-def route_loss(y, imu5, ok):
-    """imu5 (B,5,T). Body-level term: total motion out of the room slot.
-    Limb term (LIMB=1): for each limb's motion, the fraction landing anywhere
-    but its own slot (room, or another limb's slot). Scale/static-blind."""
+def route_loss(y, imu6, ok):
+    """imu6 (B,6,T): ch0 raw total motion, ch1..5 residualized limb envelopes.
+    Body term: total motion out of the room slot. Limb term: each limb's
+    OWN motion (residualized) into its own slot. Scale/static-blind."""
     er = _env(y[:, 0])
     ep = _env(y[:, 1:].sum(1))
-    gt = F.avg_pool1d(imu5.sum(1, keepdim=True), 16, 8)[:, 0]
+    gt = F.avg_pool1d(imu6[:, :1], 16, 8)[:, 0]
     live = ((er.var(-1) > 1e-12) & (ep.var(-1) > 1e-12)
             & (gt.var(-1) > 1e-12) & (ok > 0.5))
     if live.sum() == 0: return y.new_zeros(()), y.new_zeros(())
@@ -205,7 +216,7 @@ def route_loss(y, imu5, ok):
     rp = (_zs(ep) * _zs(gt)).mean(-1).clamp_min(0)
     body_term = (rs / (rs + rp + 1e-8))[live].mean()
     if not LIMB: return body_term, y.new_zeros(())
-    gl = F.avg_pool1d(imu5, 16, 8)                       # (B,5,F)
+    gl = F.avg_pool1d(imu6[:, 1:], 16, 8)                # (B,5,F)
     envs = torch.stack([_env(y[:, 2 + i]) for i in range(5)], 1)  # (B,5,F)
     ez, gz, rz = _zs(envs), _zs(gl), _zs(er).unsqueeze(1)
     A = (ez.unsqueeze(2) * gz.unsqueeze(1)).mean(-1).clamp_min(0)  # slot i x limb j
