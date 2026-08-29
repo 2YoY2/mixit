@@ -34,7 +34,9 @@ NSH = int(os.environ.get("NSH", "20"))
 WINF, HOPF = 256, 128
 freqs = np.fft.fftfreq(WINF, 1 / 400.0)
 FSEL = (np.abs(freqs) >= 2) & (np.abs(freqs) <= 150)
-PAIRS = [("LW-vs-RW hand", 12, 11), ("wrist-vs-leg", 5, 17)]
+PAIRS = [(n, int(a), int(b)) for n, a, b in
+         (p.split(":") for p in os.environ.get(
+             "PAIRS", "hand-vs-otherhand:1:2").split(";"))]
 
 def sig_rx(root, rid):
     """one receiver's spatial signature: per-island motion-band log energy,
