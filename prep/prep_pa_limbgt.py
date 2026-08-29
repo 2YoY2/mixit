@@ -21,6 +21,8 @@ ROOT  = os.path.expanduser(os.environ.get("ROOT", "~/zerdani/buffer/PerceptAlign
 OUT   = os.path.expanduser(os.environ.get("PREP_OUT", "~/zerdani/buffer/octonet/prep_pa_xrf"))
 CLIPS = int(os.environ.get("CLIPS", "3000"))
 NPROC = int(os.environ.get("NPROC", "6"))
+FS    = float(os.environ.get("FS", "50"))  # must match the target prep's grid
+SMK   = max(3, int(FS / 2)) | 1            # 0.5 s smoothing at any rate
 JB = [7, 4, 12, 9, 0]                     # BODY25 LW RW LHip RHip Nose
 
 def one(job):
@@ -41,14 +43,14 @@ def one(job):
         if np.nanmedian(np.abs(P)) > 50: P *= 1e-3          # mm -> m
         out = []
         for rid, nsamp in rows:
-            dur = nsamp / 50.0
+            dur = nsamp / FS
             fps = len(fs) / dur
             v = np.linalg.norm(np.diff(P[:, JB], axis=0), axis=-1) * fps
             v = np.where(np.isfinite(v), v, 0)
             tv = (np.arange(len(v)) + 0.5) / fps
-            ti = np.arange(nsamp) / 50.0
+            ti = np.arange(nsamp) / FS
             e = np.stack([np.interp(ti, tv, v[:, i]) for i in range(5)], 1)
-            e = uniform_filter1d(e.astype(np.float32), 25, axis=0)
+            e = uniform_filter1d(e.astype(np.float32), SMK, axis=0)
             if e.std() < 1e-9: continue
             e = e / (e.std(0) + 1e-9)
             np.save(f"{OUT}/imu/{rid:06d}.npy", e.astype(np.float16))
