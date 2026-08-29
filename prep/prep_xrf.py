@@ -156,7 +156,7 @@ def one(job):
 def main():
     os.makedirs(f"{OUT}/streams", exist_ok=True)
     os.makedirs(f"{OUT}/imu", exist_ok=True)
-    w, _ = files()
+    w = files()[0]
     names = [x.decode() if isinstance(x, bytes) else x
              for x in w["sample_names"][...]]
     jobs = list(enumerate(sorted(names)))
