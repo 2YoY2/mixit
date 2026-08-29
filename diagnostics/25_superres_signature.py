@@ -58,8 +58,9 @@ def read_products(path):
     x, t = x[..., keep], t[keep]
     if float(t[-1]) < 2.0: return None
     x = np.moveaxis(x, -1, 0)                                  # (T,3,57)
-    g = np.sqrt((np.abs(x) ** 2).mean(axis=(1, 2), keepdims=True)) + 1e-12
-    x = x / g
+    # NO per-packet AGC here: dividing by a time-varying gain turns
+    # static/g(t) into a fake dynamic term with the ROOM's spatial pattern.
+    # Scale is handled by the phase-safe CMN (|static| division) downstream.
     y = x[:, 1:, :] * np.conj(x[:, :1, :])                     # (T,2,57)
     nb = int(float(t[-1]) * FS)
     if nb < WINF + HOPF: return None
