@@ -53,7 +53,36 @@ class Sep(nn.Module):
         y = y.view(-1, M, C, T)
         res = x - y.sum(1)
         return torch.cat([y[:, :1], (y[:, 1] + res).unsqueeze(1), y[:, 2:]], 1)
-net = Sep().to(dev).eval()
+class PISep(nn.Module):
+    def __init__(self, H=64, E=8):
+        super().__init__()
+        self.emb = nn.Embedding(3, E)
+        tid = torch.zeros(C, dtype=torch.long)
+        tid[90:177] = 1; tid[177:] = 2
+        self.register_buffer("tid", tid)
+        self.inp = nn.Conv1d(1 + E, H, 1)
+        self.blocks = nn.ModuleList([nn.Sequential(
+            nn.ConstantPad1d((4 * d, 0), 0.0),
+            nn.Conv1d(H, H, 5, dilation=d), nn.PReLU(),
+            nn.Conv1d(H, H, 1)) for d in (1, 2, 4, 8, 16, 32, 64, 128)])
+        self.head = nn.Sequential(nn.Conv1d(2 * H, H, 1), nn.PReLU(),
+                                  nn.Conv1d(H, M, 1))
+    def forward(self, x):
+        B, Cc, T = x.shape
+        e = self.emb(self.tid)
+        u = torch.cat([x.reshape(B * Cc, 1, T),
+                       e.repeat(B, 1)[:, :, None].expand(B * Cc, e.shape[1], T)], 1)
+        z = self.inp(u)
+        for b in self.blocks:
+            z = z + b(z)
+        H_ = z.shape[1]
+        g = z.reshape(B, Cc, H_, T).mean(1)
+        gz = g[:, None].expand(B, Cc, H_, T).reshape(B * Cc, H_, T)
+        m = self.head(torch.cat([z, gz], 1))
+        m = torch.softmax(m, 1).reshape(B, Cc, M, T).permute(0, 2, 1, 3)
+        return m * x[:, None]
+
+net = (PISep() if ck["cfg"].get("ARCH", "conv") == "pi" else Sep()).to(dev).eval()
 net.load_state_dict(ck["model"])
 
 def morph(sb, sa):

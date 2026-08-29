@@ -50,6 +50,7 @@ INIT   = os.environ.get("INIT", "")              # warm-start ckpt (model only)
 GROUPBY = os.environ.get("GROUPBY", "scene,rx").split(",")
 ADIR   = os.environ.get("ANCHORDIR", "imu")      # anchor modality A/B: imu | imu_pose
 METAF  = os.environ.get("META", "meta.csv")
+ARCH   = os.environ.get("ARCH", "conv")          # conv | pi (permutation-invariant)
 C = 264
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
@@ -191,6 +192,43 @@ class Sep(nn.Module):
         y = torch.cat([y[:, :1], (y[:, 1] + res).unsqueeze(1), y[:, 2:]], 1)
         return y                                  # (B, M, C, T)
 
+class PISep(nn.Module):
+    """Lever 2: permutation-invariant over channels. One shared temporal TCN
+    per channel (identical weights -> channel identity does not exist in the
+    hypothesis class), a mean-pooled context (symmetric over channels), and
+    per-channel softmax masks over M slots. Room spatial patterns -- WHICH
+    channels light up -- are structurally inexpressible; only room-invariant
+    temporal structure remains usable. Softmax partition => sum of slots = x
+    exactly and no anti-phase slot inflation. Only a 3-way TYPE embedding
+    (amp / island-re / island-im) is provided: signal type is physics, not room."""
+    def __init__(self, H=64, E=8):
+        super().__init__()
+        self.emb = nn.Embedding(3, E)
+        tid = torch.zeros(C, dtype=torch.long)
+        tid[90:177] = 1; tid[177:] = 2
+        self.register_buffer("tid", tid)
+        self.inp = nn.Conv1d(1 + E, H, 1)
+        self.blocks = nn.ModuleList([nn.Sequential(
+            nn.ConstantPad1d((4 * d, 0), 0.0),
+            nn.Conv1d(H, H, 5, dilation=d), nn.PReLU(),
+            nn.Conv1d(H, H, 1)) for d in (1, 2, 4, 8, 16, 32, 64, 128)])
+        self.head = nn.Sequential(nn.Conv1d(2 * H, H, 1), nn.PReLU(),
+                                  nn.Conv1d(H, M, 1))
+    def forward(self, x):                         # (B, C, T)
+        B, Cc, T = x.shape
+        e = self.emb(self.tid)                     # (C, E)
+        u = torch.cat([x.reshape(B * Cc, 1, T),
+                       e.repeat(B, 1)[:, :, None].expand(B * Cc, e.shape[1], T)], 1)
+        z = self.inp(u)
+        for b in self.blocks:
+            z = z + b(z)
+        H_ = z.shape[1]
+        g = z.reshape(B, Cc, H_, T).mean(1)        # symmetric context
+        gz = g[:, None].expand(B, Cc, H_, T).reshape(B * Cc, H_, T)
+        m = self.head(torch.cat([z, gz], 1))       # (B*C, M, T)
+        m = torch.softmax(m, 1).reshape(B, Cc, M, T).permute(0, 2, 1, 3)
+        return m * x[:, None]                      # (B, M, C, T), sums to x
+
 def neg_snr(est, ref):
     num = ref.pow(2).sum((-2, -1)) + 1e-10
     den = (ref - est).pow(2).sum((-2, -1)) + 1e-10
@@ -236,7 +274,7 @@ def main():
     if "split" in meta.columns:
         meta = meta[meta.split == "train"]
     meta = meta[meta.nsamp >= WIN].reset_index(drop=True)
-    model = Sep()
+    model = PISep() if ARCH == "pi" else Sep()
     for attempt in range(10):
         try:
             model = model.to(dev); break
@@ -313,7 +351,8 @@ def main():
                   "sch": sch.state_dict(), "step": step, "steps_total": STEPS,
                   "xrf": True, "cfg": {"DEG": DEG, "WIN": WIN, "IMUW": IMUW,
                                        "LIMBW": LIMBW, "SELF": SELF,
-                                       "LIMB": LIMB, "M": M, "AUG": AUG}}
+                                       "LIMB": LIMB, "M": M, "AUG": AUG,
+                                       "ARCH": ARCH}}
             torch.save(ck, f"{RUNS}/last.pt")
             if v < best:
                 best = v
