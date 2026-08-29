@@ -150,6 +150,10 @@ def main():
     files = sorted(os.path.relpath(f, ROOT) for f in
                    glob.glob(f"{ROOT}/Scene*/user*/action*/*/csi_mat/*.mat"))
     jobs = list(enumerate(files))
+    # scenes 1,4,5 first: train-core + both test rooms land early so the
+    # trainer can be brought up while scenes 2-3 (train bulk) fill in behind
+    prio = {"Scene1": 0, "Scene4": 1, "Scene5": 2, "Scene2": 3, "Scene3": 4}
+    jobs.sort(key=lambda j: prio.get(j[1].split("/")[0], 9))
     if LIMIT: jobs = jobs[:LIMIT]
     print(f"{len(jobs)} mats -> {OUT}", flush=True)
     rows = []
