@@ -102,12 +102,13 @@ def one(job):
         e = envelopes(imu)                                                 # (T,5)
         lag, peak = lag_align(ecz, e, T)
         ep, lag_p, peak_p = None, 0, 0.0
-        try:
-            ep = pose_env(pf["samples"][name], T)
-            if ep is not None:
-                lag_p, peak_p = lag_align(ecz, ep, T)
-        except Exception:
-            ep = None
+        if os.environ.get("POSE", "0") == "1":     # user: no pose GT in pretrain
+            try:                                    # (validated; enable later)
+                ep = pose_env(pf["samples"][name], T)
+                if ep is not None:
+                    lag_p, peak_p = lag_align(ecz, ep, T)
+            except Exception:
+                ep = None
         def shift(v, l):
             return v[l:] if l > 0 else (v[:len(v) + l] if l < 0 else v)
         e = shift(e, lag)
