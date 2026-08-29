@@ -107,13 +107,13 @@ def tokenize(y):
                                for k in range(57 - L + 1)], 0)
     R = A.conj().transpose(0, 2, 1) @ A                  # (nbin, 40, 40)
     ew, ev = np.linalg.eigh(R)
-    En = ev[:, :, :2 * L - 1]                            # noise subspaces
-    peak = np.empty(nbin, np.int64)
-    for c0 in range(0, nbin, CHUNK):
-        Enc = En[c0:c0 + CHUNK]
-        proj = np.einsum("gd,bdn->bgn", STEER, Enc)
-        P = 1.0 / np.maximum((np.abs(proj) ** 2).sum(-1), 1e-12)
-        peak[c0:c0 + CHUNK] = P.argmax(1)
+    # D=1 noise projection via completeness: ||En^H a||^2 = 1 - |v_top^H a|^2
+    # (STEER rows are unit-norm conj steering) -- exact, 40x cheaper than
+    # projecting on the 39-dim noise subspace explicitly.
+    vtop = ev[:, :, -1]                                  # (nbin, 2L)
+    sv = STEER @ vtop.T                                  # (grid, nbin)
+    P = 1.0 / np.maximum(1.0 - np.abs(sv) ** 2, 1e-6)
+    peak = P.argmax(0)
     toks = np.c_[ws.astype(np.float32), FPOS[fs],
                  PH[IPH[peak]].astype(np.float32),
                  PS[IPS[peak]].astype(np.float32),
