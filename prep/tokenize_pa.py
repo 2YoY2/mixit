@@ -155,6 +155,17 @@ def main():
     prio = {"Scene1": 0, "Scene4": 1, "Scene5": 2, "Scene2": 3, "Scene3": 4}
     jobs.sort(key=lambda j: prio.get(j[1].split("/")[0], 9))
     if LIMIT: jobs = jobs[:LIMIT]
+    mrows = []
+    for rid, f in jobs:                       # manifest upfront: the trainer
+        mm = PAT.search(f)                    # starts before this pass ends
+        if mm is None: continue
+        sc, us, ac = int(mm.group(1)), int(mm.group(2)), int(mm.group(3))
+        cl, tk, rx = mm.group(4), int(mm.group(5)), int(mm.group(6))
+        mrows.append((rid, f, f"s{sc}_u{us}_a{ac}_{cl}_t{tk}_r{rx}", f"r{rx}",
+                      sc, us, ac, tk, "train" if sc <= 3 else "test"))
+    pd.DataFrame(mrows, columns=["rid", "file", "name", "node", "scene",
+                                 "subject", "act", "trial", "split"]
+                 ).to_csv(f"{OUT}/manifest.csv", index=False)
     print(f"{len(jobs)} mats -> {OUT}", flush=True)
     rows = []
     with Pool(NPROC) as pool:
