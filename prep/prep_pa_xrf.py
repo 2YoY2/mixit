@@ -115,6 +115,10 @@ def main():
     os.makedirs(f"{OUT}/streams", exist_ok=True)
     files = sorted(os.path.relpath(f, ROOT) for f in
                    glob.glob(f"{ROOT}/Scene*/user*/action*/*/csi_mat/*.mat"))
+    scn = os.environ.get("SCENES", "")
+    if scn:
+        keep = {f"Scene{s.strip()}" for s in scn.split(",")}
+        files = [f for f in files if f.split("/")[0] in keep]
     jobs = list(enumerate(files))
     if LIMIT: jobs = jobs[:LIMIT]
     print(f"{len(jobs)} mats -> {OUT} (FS={FS})", flush=True)

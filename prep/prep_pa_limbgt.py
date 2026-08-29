@@ -62,7 +62,8 @@ def one(job):
 def main():
     os.makedirs(f"{OUT}/imu", exist_ok=True)
     meta = pd.read_csv(f"{OUT}/meta.csv")
-    tr = meta[meta.split == "train"].copy()
+    spl = os.environ.get("SPLIT", "train")
+    tr = meta[meta.split == spl].copy()
     tr["kd"] = tr.file.map(lambda f: os.path.join(
         ROOT, os.path.dirname(os.path.dirname(f)), "fresh3d/keypoints3d"))
     groups = [(kd, [(int(r.rid), int(r.nsamp)) for r in g.itertuples()])

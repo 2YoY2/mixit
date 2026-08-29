@@ -25,6 +25,8 @@ dev = "cuda" if torch.cuda.is_available() else "cpu"
 ck = torch.load(f"{RUNS}/{CKPT}", map_location=dev, weights_only=False)
 assert ck.get("xrf"), "not a train_xrf checkpoint"
 DEG, SELF = ck["cfg"]["DEG"], ck["cfg"].get("SELF", 1)
+M = ck["cfg"].get("M", 2)
+LIMB = int(ck["cfg"].get("LIMB", 0)) and M > 2
 CH30 = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, 30), DEG)
 CH29 = np.polynomial.chebyshev.chebvander(np.linspace(-1, 1, 29), DEG)
 print(f"ckpt {CKPT} step {ck['step']} val {ck.get('val')} cfg {ck['cfg']} dev={dev}")
@@ -34,7 +36,7 @@ class Sep(nn.Module):
     def __init__(self, cin=C, nf=512, L=16, S=8):
         super().__init__()
         self.enc = nn.Conv1d(cin * (1 + SELF), nf, L, stride=S)
-        self.masker = TDConvNet(in_chan=nf, n_src=2, out_chan=nf, n_blocks=8,
+        self.masker = TDConvNet(in_chan=nf, n_src=M, out_chan=nf, n_blocks=8,
                                 n_repeats=4, bn_chan=192, hid_chan=512,
                                 skip_chan=192, mask_act="linear",
                                 causal=True, norm_type="cLN")
@@ -48,8 +50,9 @@ class Sep(nn.Module):
             xin = x
         e = self.enc(xin)
         y = self.dec((self.masker(e) * e.unsqueeze(1)).flatten(0, 1))[..., :T]
-        y = y.view(-1, 2, C, T)
-        return y[:, 0], y[:, 1] + (x - y.sum(1))
+        y = y.view(-1, M, C, T)
+        res = x - y.sum(1)
+        return torch.cat([y[:, :1], (y[:, 1] + res).unsqueeze(1), y[:, 2:]], 1)
 net = Sep().to(dev).eval()
 net.load_state_dict(ck["model"])
 
@@ -90,16 +93,17 @@ tmpl = {k: np.mean([statics[int(r)] for r in g.rid], 0)
 
 def arms(x, key):
     with torch.no_grad():
-        s, p = net(torch.from_numpy(x.T[None]).to(dev))
-    s, p = s[0].cpu().numpy().T, p[0].cpu().numpy().T
+        y = net(torch.from_numpy(x.T[None]).to(dev))[0].cpu().numpy()
+    s, p = y[0].T, y[1:].sum(0).T
     t = tmpl[key]
     fit = morph(t, x.mean(0))
     return {"model": (s, p), "trivial": (np.broadcast_to(t, x.shape), x - t),
-            "deflate": (np.broadcast_to(fit, x.shape), x - fit)}
+            "deflate": (np.broadcast_to(fit, x.shape), x - fit)}, y
 
 ARMS = ("model", "trivial", "deflate")
 per = {a: {"psf": [], "pstat": {}} for a in ARMS}
 hp_room = []
+LIMBROWS = {i: {"own": [], "cross": [], "room": []} for i in range(5)}
 for r in meta.itertuples():
     x = np.asarray(np.load(f"{OUT}/streams/{r.rid:06d}.npy"), np.float32)
     T = len(x) - ((len(x) - 16) % 8)
@@ -111,12 +115,41 @@ for r in meta.itertuples():
                .to_numpy(np.float32)
         xh = x - ma
         with torch.no_grad():
-            sh, _ = net(torch.from_numpy(xh.T[None]).to(dev))
-        hp_room.append(float((sh[0].cpu().numpy() ** 2).mean()
+            yh = net(torch.from_numpy(xh.T[None]).to(dev))
+        hp_room.append(float((yh[0, 0].cpu().numpy() ** 2).mean()
                              / max((xh ** 2).mean(), 1e-12)))
-    for a, (s, p) in arms(x, key).items():
+    armd, yfull = arms(x, key)
+    for a, (s, p) in armd.items():
         per[a]["psf"].append(sfrac(p))
         per[a]["pstat"][int(r.rid)] = p.mean(0)
+    if LIMB and os.path.exists(f"{OUT}/imu/{r.rid:06d}.npy"):
+        gi = np.asarray(np.load(f"{OUT}/imu/{r.rid:06d}.npy"),
+                        np.float32)[:T]
+        g2 = gi.copy()
+        for i_ in range(5):
+            oth = [j for j in range(5) if j != i_]
+            A_ = np.c_[gi[:, oth], np.ones(T, np.float32)]
+            beta, *_ = np.linalg.lstsq(A_, gi[:, i_], rcond=None)
+            g2[:, i_] = np.clip(gi[:, i_] - A_ @ beta, 0, None)
+        def envnp(z):
+            d = z - z.mean(0); e = (d ** 2).sum(1)
+            n = (len(e) - 16) // 8 + 1
+            ix = np.arange(n)[:, None] * 8 + np.arange(16)
+            return e[ix].mean(1)
+        def poolg(v):
+            n = (len(v) - 16) // 8 + 1
+            ix = np.arange(n)[:, None] * 8 + np.arange(16)
+            return v[ix].mean(1)
+        er = envnp(yfull[0].T)
+        evs = [envnp(yfull[2 + i].T) for i in range(5)]
+        ga = [poolg(g2[:, i]) for i in range(5)]
+        for i in range(5):
+            if ga[i].std() < 1e-9: continue
+            own = corr(evs[i], ga[i])
+            crs = np.nanmean([corr(evs[j], ga[i]) for j in range(5) if j != i])
+            LIMBROWS[i]["own"].append(own)
+            LIMBROWS[i]["cross"].append(crs)
+            LIMBROWS[i]["room"].append(corr(er, ga[i]))
 
 rng = np.random.default_rng(0)
 groups = {k: list(g.rid.astype(int)) for k, g in meta.groupby(["node", "date"])
@@ -130,7 +163,7 @@ for _ in range(NPAIR):
     T = len(xa) - ((len(xa) - 16) % 8)
     xa = xa[:T]
     tgt = xa - morph(statics[rb], statics[ra])[None, :]
-    for a, (s, p) in arms(xa, k).items():
+    for a, (s, p) in arms(xa, k)[0].items():
         snr[a].append(10 * np.log10(max((tgt ** 2).sum(), 1e-12)
                                     / max(((tgt - p) ** 2).sum(), 1e-12)))
         leak[a].append(corr(per[a]["pstat"][ra], per[a]["pstat"][rb]))
