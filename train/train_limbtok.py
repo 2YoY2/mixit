@@ -29,8 +29,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 TOK   = os.path.expanduser(os.environ.get("TOK", "~/zerdani/buffer/octonet/pa_tokens"))
-GTTR  = os.path.expanduser(os.environ.get("GTTR", "~/zerdani/buffer/octonet/prep_pa_xrf400"))
-GTTE  = os.path.expanduser(os.environ.get("GTTE", "~/zerdani/buffer/octonet/prep_pa_xrf400t"))
 RUNS  = os.path.expanduser(os.environ.get("MIXIT_RUNS", "~/zerdani/buffer/octonet/limbtok_runs"))
 STEPS = int(os.environ.get("STEPS", "20000"))
 HOURS = float(os.environ.get("HOURS", "2"))
@@ -142,21 +140,17 @@ def main():
     man = pd.read_csv(f"{TOK}/manifest.csv")
     have = {int(f[:6]) for f in os.listdir(f"{TOK}/tokens")}
     man = man[man.rid.isin(have)]
-    gtr = pd.read_csv(f"{GTTR}/meta.csv"); gtr = gtr[gtr.imu_ok == 1]
-    gte = pd.read_csv(f"{GTTE}/meta.csv"); gte = gte[gte.imu_ok == 1]
-    j_tr = man[man.split == "train"].merge(
-        gtr[["file", "rid"]], on="file", suffixes=("", "_gt"))
-    j_te = man[man.split == "test"].merge(
-        gte[["file", "rid"]], on="file", suffixes=("", "_gt"))
+    gtset = {int(f[:6]) for f in os.listdir(f"{TOK}/imu")} \
+        if os.path.isdir(f"{TOK}/imu") else set()
     tr_all = man[man.split == "train"].reset_index(drop=True)
+    gt_tr = {int(r): f"{TOK}/imu/{int(r):06d}.npy"
+             for r in tr_all.rid.values if int(r) in gtset}
+    gt_te = {int(r): f"{TOK}/imu/{int(r):06d}.npy"
+             for r in man[man.split == "test"].rid.values if int(r) in gtset}
     print(f"tokens on disk: {len(man)} | train {len(tr_all)} "
-          f"(with GT {len(j_tr)}) | test with GT {len(j_te)} | dev={dev}",
+          f"(with GT {len(gt_tr)}) | test with GT {len(gt_te)} | dev={dev}",
           flush=True)
     rng = np.random.default_rng(SEED)
-    gt_tr = {int(r.rid): f"{GTTR}/imu/{int(r.rid_gt):06d}.npy"
-             for r in j_tr.itertuples()}
-    gt_te = {int(r.rid): f"{GTTE}/imu/{int(r.rid_gt):06d}.npy"
-             for r in j_te.itertuples()}
     pit_ids = np.array(sorted(gt_tr))
     bynode = {k: g.rid.values for k, g in tr_all.groupby("node")}
     ev_ids = rng.permutation(np.array(sorted(gt_te)))[:NEVAL]
