@@ -4,11 +4,14 @@ motion component, then MUSIC super-resolves it over the antenna x subcarrier
 aperture -- the coherent test the island prep structurally cannot do (islands
 are within-antenna products; cross-antenna phase never survives the prep).
 
+The island representation was an XRF-compatibility choice; constraint gone.
+Replacement here: the coherent representation, full 57 subcarriers kept.
 Per raw .mat (3 ant, 57 subc, ~900 Hz):
   conj-mult antennas 2,3 against antenna 1 per packet  -> CFO/SFO cancel
     exactly (one LO), relative antenna phase of the DYNAMIC path survives
-  bin to 400 Hz, subtract time-mean = phase-preserving static removal
-    (dividing would rotate each element arbitrarily and break steering)
+  bin to 400 Hz; normalize = CMN made phase-safe: subtract the complex
+    static, divide by its MAGNITUDE only (complex division would rotate
+    each element arbitrarily and break the steering model)
   STFT 0.64 s; snapshots = POSITIVE 2-150 Hz bins only (one-sided selection
     isolates dyn*conj(static) from its mirror static*conj(dyn))
   subcarrier smoothing (L=20) -> covariance -> MUSIC over
@@ -84,8 +87,12 @@ STEER = (A_ANT[:, None, :, None] * A_SUB[None, :, None, :]).reshape(
 STEER = (STEER / np.sqrt(2 * L)).astype(np.complex64).conj()
 
 def music_sig(y):
-    """log MUSIC spectrum (NPH*NPS,) + circular-mean antenna phase, or None."""
-    dyn = (y - y.mean(0)).astype(np.complex64)
+    """log MUSIC spectrum (NPH*NPS,) + circular-mean antenna phase, or None.
+    Normalization = CMN made phase-safe: subtract the complex static, divide
+    by its MAGNITUDE (gain equalized, steering phases untouched)."""
+    yb = y.mean(0)
+    ga = np.maximum(np.abs(yb), 0.05 * np.median(np.abs(yb)) + 1e-12)
+    dyn = ((y - yb) / ga).astype(np.complex64)
     T = len(dyn)
     nw = (T - WINF) // HOPF + 1
     han = np.hanning(WINF)[:, None, None].astype(np.float32)
