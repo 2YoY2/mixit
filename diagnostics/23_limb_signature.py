@@ -58,9 +58,13 @@ def sig_rx(root, rid):
     e = np.log10(e / nw + 1e-12)
     return (e - e.mean()).astype(np.float32), np.float32(e.mean())
 
+CLIPKEY = os.environ.get("CLIPKEY", "")   # e.g. 1-1-1: only that clip dir
+
 def clips(root, meta, act):
     """(n,261) signatures + (n,3) intensity scalars for 3-rx-complete clips."""
     m = meta[meta.act == act].copy()
+    if CLIPKEY:
+        m = m[m["name"].str.contains(f"_{CLIPKEY}_t", regex=False)]
     m["ck"] = m["name"].str.replace(r"_r\d$", "", regex=True)
     S, I = [], []
     for ck, g in m.groupby("ck"):
