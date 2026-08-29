@@ -40,17 +40,47 @@ def files():
     if "w" not in _H:
         _H["w"] = h5py.File(f"{SRC}/wifi_50hz_853_video_aligned.h5", "r")
         _H["i"] = h5py.File(f"{SRC}/imu_50hz_853_video_aligned.h5", "r")
-    return _H["w"], _H["i"]
+        _H["p"] = h5py.File(f"{SRC}/pose3d_coco17_depth_853_video_aligned.h5", "r")
+    return _H["w"], _H["i"], _H["p"]
 
 def envelopes(imu):
     x = imu.astype(np.float32)
     hp = x - uniform_filter1d(x, SM, axis=0)
     return uniform_filter1d(np.sqrt((hp ** 2).sum(-1)), SM, axis=0)
 
+JP = [9, 10, 11, 12, 0]        # COCO17 LWrist RWrist LHip RHip Nose = LW RW LP RP GL
+
+def pose_env(po, Timu):
+    """pose3d -> (T,5) limb-speed envelopes on the 50 Hz grid, conf-masked."""
+    kp = po["pose3d_camera"][...]                      # (F,17,4) xyz+conf
+    ts = po["timestamps_sec"][...].astype(np.float64)
+    xyz = kp[:, :, :3].astype(np.float64)
+    xyz[kp[:, :, 3] < 0.3] = np.nan
+    k = np.concatenate([[True], np.diff(ts) > 0])
+    xyz, ts = xyz[k], ts[k]
+    if len(ts) < 30: return None
+    v = np.linalg.norm(np.diff(xyz[:, JP], axis=0), axis=-1) / \
+        np.diff(ts)[:, None]
+    v = np.where(np.isfinite(v), v, 0)
+    tv = (ts[1:] + ts[:-1]) / 2 - ts[0]
+    ti = np.arange(Timu) / 50.0
+    e = np.stack([np.interp(ti, tv, v[:, i]) for i in range(5)], 1)
+    return uniform_filter1d(e.astype(np.float32), 15, axis=0)
+
+def lag_align(ecz, e, T):
+    """one clock offset for anchor e (T,5) vs CSI dyn-energy z-score ecz."""
+    ei = e.sum(1)
+    eiz = (ei - ei.mean()) / (ei.std() + 1e-9)
+    L = 75
+    cc = np.array([float((ecz[max(0, -l):T - max(0, l)]
+                          * eiz[max(0, l):T - max(0, -l)]).mean())
+                   for l in range(-L, L + 1)])
+    return int(np.argmax(cc)) - L, float(cc.max())
+
 def one(job):
     idx, name = job
     try:
-        w, im = files()
+        w, im, pf = files()
         g = w["samples"][name]
         amp = g["amp"][...].astype(np.float32)
         pha = g["pha"][...].astype(np.float32)
@@ -65,22 +95,35 @@ def one(job):
         dev = np.abs(a2 - med)
         mad = median_filter(dev, size=(31, 1)) * 1.4826 + 1e-9
         amp = np.where(dev > 3 * mad, med, a2).reshape(amp.shape)
-        # sequence-level IMU lag from TOTAL motion
+        # per-anchor clock offsets vs CSI (all three clocks drift mutually)
         hp = a2 - uniform_filter1d(a2, SM, axis=0)
         ec = uniform_filter1d((hp ** 2).sum(1), 10)
-        e = envelopes(imu)                                                 # (T,5)
-        ei = e.sum(1)
         ecz = (ec - ec.mean()) / (ec.std() + 1e-9)
-        eiz = (ei - ei.mean()) / (ei.std() + 1e-9)
-        L = 75
-        cc = np.array([float((ecz[max(0, -l):T - max(0, l)]
-                              * eiz[max(0, l):T - max(0, -l)]).mean())
-                       for l in range(-L, L + 1)])
-        lag = int(np.argmax(cc)) - L
-        peak = float(cc.max())
-        if lag > 0:   amp, pha, e = amp[:T - lag], pha[:T - lag], e[lag:]
-        elif lag < 0: amp, pha, e = amp[-lag:], pha[-lag:], e[:T + lag]
-        T2 = len(e)
+        e = envelopes(imu)                                                 # (T,5)
+        lag, peak = lag_align(ecz, e, T)
+        ep, lag_p, peak_p = None, 0, 0.0
+        try:
+            ep = pose_env(pf["samples"][name], T)
+            if ep is not None:
+                lag_p, peak_p = lag_align(ecz, ep, T)
+        except Exception:
+            ep = None
+        def shift(v, l):
+            return v[l:] if l > 0 else (v[:len(v) + l] if l < 0 else v)
+        e = shift(e, lag)
+        if ep is not None: ep = shift(ep, lag_p)
+        T2 = min(len(e), len(ep) if ep is not None else len(e), T)
+        amp, pha, e = amp[:T2], pha[:T2], e[:T2]
+        # fuse anchors per limb: z-scored mean of whichever passed its lag scan
+        ez = e / (e.std(0) + 1e-9)
+        use_imu, use_pose = peak > 0.2, ep is not None and peak_p > 0.2
+        if use_pose:
+            epz = ep[:T2] / (ep[:T2].std(0) + 1e-9)
+            fused = (ez + epz) / 2 if use_imu else epz
+        else:
+            fused = ez
+        e = fused
+        imu_ok_flag = int(use_imu or use_pose)
         subj, scene_s, take = name.split("_")
         rows = []
         for rx in range(3):
@@ -103,7 +146,7 @@ def one(job):
             np.save(f"{OUT}/imu/{rid:06d}.npy",
                     (e / (e.std(0) + 1e-9)).astype(np.float16))
             rows.append((rid, name, SCENE.get(scene_s, -1), int(subj), int(take),
-                         rx, T2, lag, round(peak, 3), int(peak > 0.2), "train"))
+                         rx, T2, lag, round(peak, 3), imu_ok_flag, "train"))
         return rows
     except Exception:
         if os.environ.get("DEBUG"):
