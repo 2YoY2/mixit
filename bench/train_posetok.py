@@ -141,6 +141,20 @@ def main():
     net = PoseTok().to(dev)
     print(f"params {sum(p.numel() for p in net.parameters())/1e6:.1f}M", flush=True)
     opt = torch.optim.Adam(net.parameters(), lr=LR, weight_decay=1e-5)
+    OUTD = os.path.expanduser("~/zerdani/buffer/octonet/posetok_runs")
+    os.makedirs(OUTD, exist_ok=True)
+    def qev(ds, cap=150):
+        rs = []
+        with torch.no_grad():
+            for tok, P, nw in ds[:cap]:
+                X = torch.from_numpy(tok.astype(np.float32))[None].to(dev)
+                mask = torch.zeros(1, len(tok), dtype=torch.bool, device=dev)
+                pr = net(X, mask, [nw])[0, :len(P)].cpu().numpy()
+                r = mpjpe_pck(pr, P)
+                if r: rs.append(r)
+        rs = np.array(rs)
+        return rs[:, 0].mean(), rs[:, 1].mean() * 100, rs[:, 2].mean() * 100
+    best = 1e9
     t0 = time.time()
     for step in range(STEPS):
         if (time.time() - t0) / 3600 > HOURS: break
@@ -168,6 +182,20 @@ def main():
         if step % 500 == 0:
             print(f"[{step}] L1 {loss.item()*1000:.1f} mm "
                   f"{(time.time()-t0)/3600:.2f}h", flush=True)
+        if step % 2000 == 0 and step > 0:
+            net.eval()
+            h = qev(ho); t = qev(te)
+            print(f"  EVAL [{step}] heldout MPJPE {h[0]:.0f} mm "
+                  f"PCK20/50 {h[1]:.0f}/{h[2]:.0f} | scene4 MPJPE {t[0]:.0f} mm "
+                  f"PCK20/50 {t[1]:.0f}/{t[2]:.0f}"
+                  f"{'  (best)' if h[0] < best else ''}", flush=True)
+            torch.save({"model": net.state_dict(), "step": step},
+                       f"{OUTD}/last.pt")
+            if h[0] < best:
+                best = h[0]
+                torch.save({"model": net.state_dict(), "step": step},
+                           f"{OUTD}/best.pt")
+            net.train()
     net.eval()
     def ev(ds, tag):
         rs = []
