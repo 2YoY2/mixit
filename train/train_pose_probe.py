@@ -116,9 +116,10 @@ class Head(nn.Module):
         return self.out(self.gru(x)[0]).view(x.shape[0], -1, NJ, 3)
 
 def mpjpe(pred, gt):
-    """masked mean per-joint error (cm), root joint excluded."""
+    """masked mean per-joint error (cm), root joint excluded. (nw,NJ,3)."""
     m = np.isfinite(gt).all(-1)
-    m[:, :, 8] = False
+    m[:, 8] = False
+    if not m.any(): return np.nan
     d = np.linalg.norm(np.nan_to_num(pred - gt), axis=-1)
     return float(d[m].mean() * 100)
 
@@ -154,7 +155,7 @@ def run_arm(name, ai, tr, ho, te):
                 F = F_ if ai == 0 else R_
                 pr = head(torch.from_numpy(F)[None].to(dev))[0].cpu().numpy()
                 errs.append(mpjpe(pr, P))
-        return float(np.median(errs))
+        return float(np.nanmedian(errs))
     return ev(ho), ev(te)
 
 print(f"frozen sep: {CKPT} step {ck['step']} | building clip sets", flush=True)
@@ -171,9 +172,9 @@ for j in range(NJ):
     vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
                          for _, _, P in tr if np.isfinite(P[:, j]).any()])
     mu[j] = vs.mean(0) if len(vs) else 0
-base_ho = float(np.median([mpjpe(np.broadcast_to(mu, P.shape), P)
+base_ho = float(np.nanmedian([mpjpe(np.broadcast_to(mu, P.shape), P)
                            for _, _, P in ho]))
-base_te = float(np.median([mpjpe(np.broadcast_to(mu, P.shape), P)
+base_te = float(np.nanmedian([mpjpe(np.broadcast_to(mu, P.shape), P)
                            for _, _, P in te]))
 print(f"\nmean-pose baseline: scene1-ho {base_ho:.1f} cm | scene4 {base_te:.1f} cm",
       flush=True)
