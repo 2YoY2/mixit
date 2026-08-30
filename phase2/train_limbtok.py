@@ -43,6 +43,7 @@ MIXW  = float(os.environ.get("MIXW", "1.0"))
 EVERY = int(os.environ.get("EVERY", "500"))
 NEVAL = int(os.environ.get("NEVAL", "200"))
 SEED  = int(os.environ.get("SEED", "0"))
+CANON = int(os.environ.get("CANON", "0"))
 HOPF, WINF = 128, 256
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
@@ -68,13 +69,25 @@ for attempt in range(10):
         print(f"to({dev}) failed, retry {attempt+1}/10 in 60s", flush=True)
         time.sleep(60)
 
-def feats(z, rng=None):
+PEAKS = {}
+if CANON:
+    _pk = np.load(f"{TOK}/static_peaks.npz")
+    PEAKS = {int(r): (float(a), float(b)) for r, a, b in
+             zip(_pk["rids"], _pk["phi0"], _pk["psi0"])}
+    print(f"canonical mode: {len(PEAKS)} static peaks", flush=True)
+
+def feats(z, rid=None):
     """npz -> (n,7) float32 features + aux (w idx, energy, nw)."""
     t = z["toks"]; nw = int(z["nw"])
     le = t[:, 4]
     zle = (le - le.mean()) / (le.std() + 1e-6)
-    X = np.c_[np.sin(t[:, 2]), np.cos(t[:, 2]), np.sin(t[:, 3]),
-              np.cos(t[:, 3]), t[:, 1] / 150.0,
+    phi, psi = t[:, 2], t[:, 3]
+    if CANON and rid is not None and rid in PEAKS:
+        p0, q0 = PEAKS[rid]
+        phi = np.arctan2(np.sin(phi - p0), np.cos(phi - p0))
+        psi = np.arctan2(np.sin(psi - q0), np.cos(psi - q0))
+    X = np.c_[np.sin(phi), np.cos(phi), np.sin(psi), np.cos(psi),
+              t[:, 1] / 150.0,
               t[:, 0] / max(nw - 1, 1), zle].astype(np.float32)
     return X, t[:, 0].astype(np.int64), (10.0 ** le).astype(np.float32), nw
 
@@ -191,7 +204,7 @@ def main():
         for rid in rng.choice(pit_ids, BP, replace=False):
             z = load_rec(int(rid))
             if z is None: continue
-            recs.append(feats(z)); picks.append(int(rid))
+            recs.append(feats(z, int(rid))); picks.append(int(rid))
         npit = 0
         if recs:
             for (a, widx, e, nw), rid in zip(forward_recs(recs), picks):
@@ -207,7 +220,7 @@ def main():
             ra, rb = rng.choice(bynode[node], 2, replace=False)
             za, zb = load_rec(int(ra)), load_rec(int(rb))
             if za is None or zb is None: continue
-            Xa, wa, ea, nwa = feats(za); Xb, wb, eb, nwb = feats(zb)
+            Xa, wa, ea, nwa = feats(za, int(ra)); Xb, wb, eb, nwb = feats(zb, int(rb))
             X = np.r_[Xa, Xb]
             le = X[:, 6]                      # re-z-score energy over union
             X[:, 6] = (le - le.mean()) / (le.std() + 1e-6)
@@ -238,11 +251,12 @@ def main():
         if step % EVERY == 0 and step > step0:
             model.eval()
             mm, nn_ = [], []
+            cons = np.zeros((5, M))
             with torch.no_grad():
                 for rid in ev_ids:
                     z = load_rec(int(rid))
                     if z is None: continue
-                    X, widx, e, nw = feats(z)
+                    X, widx, e, nw = feats(z, int(rid))
                     a = model(torch.from_numpy(X)[None].to(dev),
                               torch.zeros(1, len(X), dtype=torch.bool,
                                           device=dev))[0]
@@ -261,18 +275,29 @@ def main():
                                 y1 = Gm[:T, l] - Gm[:T, l].mean()
                                 d = np.linalg.norm(x1) * np.linalg.norm(y1)
                                 C[m, c] = (x1 @ y1) / d if d > 1e-9 else 0.0
-                        return max((C[m1, 0] + C[m2, 1]) / 2
-                                   for m1 in range(M) for m2 in range(M)
-                                   if m1 != m2)
-                    mm.append(sc(G))
-                    nn_.append(sc(np.roll(G[:T], T // 2, 0)))
+                        bv, bp = -2, (0, 1)
+                        for m1 in range(M):
+                            for m2 in range(M):
+                                if m1 == m2: continue
+                                v_ = (C[m1, 0] + C[m2, 1]) / 2
+                                if v_ > bv: bv, bp = v_, (m1, m2)
+                        return bv, bp
+                    v_, (bm1, bm2) = sc(G)
+                    mm.append(v_)
+                    cons[int(order[0]), bm1] += 1
+                    cons[int(order[1]), bm2] += 1
+                    nn_.append(sc(np.roll(G[:T], T // 2, 0))[0])
             if not mm:
                 print(f"  EVAL step {step}: no test tokens yet", flush=True)
                 model.train(); continue
             mm, nn_ = np.array(mm), np.array(nn_)
             v = float(np.median(mm))
+            rows = cons.sum(1)
+            ok_ = rows >= 20
+            maj = float((cons.max(1)[ok_] / rows[ok_]).mean()) if ok_.any() else 0
             print(f"  EVAL step {step}: matched {v:+.3f}  null "
                   f"{np.median(nn_):+.3f}  win {np.mean(mm > nn_)*100:.0f}% "
+                  f"slot-consist {maj*100:.0f}% (chance {100/M:.0f}%) "
                   f"(n={len(mm)}) {'(best)' if v > best else ''}", flush=True)
             ck = {"model": model.state_dict(), "opt": opt.state_dict(),
                   "sch": sch.state_dict(), "step": step, "best": best,
