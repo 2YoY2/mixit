@@ -26,6 +26,11 @@ B = int(os.environ.get("B", "64"))
 LR = float(os.environ.get("LR", "1e-3"))
 H = int(os.environ.get("H", "128"))
 SEED = int(os.environ.get("SEED", "0"))
+ARMS = os.environ.get("ARMS", "model,raw").split(",")
+NAMES = ["L-arm-stretch", "R-arm-stretch", "both-arms-stretch",
+         "L-lateral-raise", "R-lateral-raise", "L-fwd-lunge", "R-fwd-lunge",
+         "L-side-lunge", "R-side-lunge", "jump", "pick-up", "cw-spin",
+         "ccw-spin", "jumping-jack", "squat", "L-rotation", "R-rotation"]
 NC = 17
 MIRROR = {2: 1, 5: 4, 7: 6, 9: 8, 13: 12, 17: 16}
 BANDS = [(2, 10), (10, 40), (40, 150)]
@@ -169,10 +174,20 @@ maj = max(np.bincount(yte)) / len(yte)
 print(f"train {len(tr)} / ho {len(ho)} / test45 {len(te)} | "
       f"chance {1/NC:.3f} majority {maj:.3f}", flush=True)
 for name, ai in (("model", 0), ("raw", 1)):
+    if name not in ARMS: continue
     net, (Ph, Yh), (Pt, Yt) = run_arm(name, ai, tr, ho, te)
     print(f"[{name}]", flush=True)
     report("heldout(1-3)", Ph, Yh)
     _, _ = report("test rooms 4/5", Pt, Yt)
+    print("    what the model SAYS, per true movement (rooms 4/5, top-3 %):",
+          flush=True)
+    for k in range(NC):
+        mk = Yt == k
+        if not mk.any(): continue
+        cnt = np.bincount(Pt[mk], minlength=NC) / mk.sum()
+        top = np.argsort(-cnt)[:3]
+        row = "  ".join(f"{NAMES[t]} {cnt[t]*100:.0f}%" for t in top if cnt[t] > 0)
+        print(f"      {NAMES[k]:18s} (n={mk.sum():4d}) -> {row}", flush=True)
     print("    mirror twins on rooms 4/5 (true->pred rates):", flush=True)
     for b, a in sorted(MIRROR.items()):
         ai_, bi_ = a - 1, b - 1
