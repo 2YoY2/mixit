@@ -23,6 +23,9 @@ LR = float(os.environ.get("LR", "5e-4"))
 TMAX = int(os.environ.get("TMAX", "1600"))
 STATIC = int(os.environ.get("STATIC", "0"))
 SLOTQ = int(os.environ.get("SLOTQ", "1"))
+HDIM = int(os.environ.get("HDIM", "128"))
+ENCL = int(os.environ.get("ENCL", "3"))
+HEADS = int(os.environ.get("HEADS", "4"))
 POSESLOTS = [int(v) for v in os.environ.get("POSESLOTS", "1,2").split(",")]
 VELW = float(os.environ.get("VELW", "0.5"))
 SDROP = float(os.environ.get("SDROP", "0.3"))
@@ -150,16 +153,17 @@ def get_static(rids):
     return np.stack(vs)                      # (3, 399)
 
 class PoseTok(nn.Module):
-    def __init__(self, H=128):
+    def __init__(self, H=None):
         super().__init__()
+        H = H or HDIM
         self.inp = nn.Linear(FTOK, H)
         self.sinp = nn.Linear(399, H)
         self.type_emb = nn.Parameter(torch.zeros(2, H))
-        lay = nn.TransformerEncoderLayer(H, 4, 2 * H, batch_first=True,
+        lay = nn.TransformerEncoderLayer(H, HEADS, 2 * H, batch_first=True,
                                          norm_first=True, dropout=0.1)
-        self.enc = nn.TransformerEncoder(lay, 3)
+        self.enc = nn.TransformerEncoder(lay, ENCL)
         self.qproj = nn.Linear(64 + (len(POSESLOTS) * 6 * 3 if SLOTQ else 0), H)
-        self.att = nn.MultiheadAttention(H, 4, batch_first=True)
+        self.att = nn.MultiheadAttention(H, HEADS, batch_first=True)
         self.ff = nn.Sequential(nn.Linear(H, 2 * H), nn.GELU(),
                                 nn.Linear(2 * H, H))
         self.out = nn.Linear(H, NJ * 3)
