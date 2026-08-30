@@ -11,7 +11,7 @@ Reported: 17-class acc, mirror-merged 11-class acc, per-twin confusion.
 
   python3 train/train_act_probe.py
 """
-import os, time
+import os, time, pickle
 import numpy as np
 import pandas as pd
 import torch
@@ -25,6 +25,10 @@ HOURS = float(os.environ.get("HOURS", "1.0"))
 B = int(os.environ.get("B", "64"))
 LR = float(os.environ.get("LR", "1e-3"))
 H = int(os.environ.get("H", "128"))
+NLAY = int(os.environ.get("NLAY", "2"))
+BIDIR = int(os.environ.get("BIDIR", "0"))
+DROP = float(os.environ.get("DROP", "0.0"))
+BAL = int(os.environ.get("BAL", "0"))
 SEED = int(os.environ.get("SEED", "0"))
 ARMS = os.environ.get("ARMS", "model,raw").split(",")
 NAMES = ["L-arm-stretch", "R-arm-stretch", "both-arms-stretch",
@@ -89,6 +93,9 @@ def rec_feats(rid):
     return nz(mf), nz(rf), nw
 
 def build(scenes):
+    cf = f"{TOK}/featcache_{'-'.join(map(str, scenes))}.pkl"
+    if os.path.exists(cf):
+        return pickle.load(open(cf, "rb"))
     man = pd.read_csv(f"{TOK}/manifest.csv")
     man = man[man.scene.isin(scenes)].copy()
     man["ckey"] = man["name"].str.replace(r"_r\d$", "", regex=True)
@@ -104,13 +111,16 @@ def build(scenes):
                     int(g.act.iloc[0]) - 1))
         if len(out) % 1000 == 0:
             print(f"  scenes{scenes}: {len(out)}", flush=True)
+    pickle.dump(out, open(cf, "wb"), protocol=4)
     return out
 
 class Cls(nn.Module):
     def __init__(self, fin):
         super().__init__()
-        self.gru = nn.GRU(fin, H, 2, batch_first=True)
-        self.out = nn.Linear(H, NC)
+        self.gru = nn.GRU(fin, H, NLAY, batch_first=True,
+                          bidirectional=bool(BIDIR),
+                          dropout=DROP if NLAY > 1 else 0.0)
+        self.out = nn.Linear(H * (2 if BIDIR else 1), NC)
     def forward(self, x, lens):
         h, _ = self.gru(x)
         idx = (lens - 1).view(-1, 1, 1).expand(-1, 1, h.shape[-1])
@@ -124,9 +134,16 @@ def run_arm(name, ai, tr, ho, te):
     opt = torch.optim.Adam(net.parameters(), lr=LR)
     rng = np.random.default_rng(SEED)
     t0 = time.time()
+    bycls = {}
+    for i, it in enumerate(tr): bycls.setdefault(it[2], []).append(i)
+    keys = sorted(bycls)
     for step in range(STEPS):
         if (time.time() - t0) / 3600 > HOURS / 2: break
-        ix = rng.choice(len(tr), B)
+        if BAL:
+            ix = [bycls[keys[c]][rng.integers(len(bycls[keys[c]]))]
+                  for c in rng.integers(0, len(keys), B)]
+        else:
+            ix = rng.choice(len(tr), B)
         nw = max(len(tr[i][ai]) for i in ix)
         X = torch.zeros(B, nw, fin)
         L_ = torch.tensor([len(tr[i][ai]) for i in ix])
