@@ -33,6 +33,8 @@ SLOTQ = int(os.environ.get("SLOTQ", "1"))
 HDIM = int(os.environ.get("HDIM", "128"))
 LAGFIX = int(os.environ.get("LAGFIX", "0"))
 STATTOK = int(os.environ.get("STATTOK", "0"))
+PERSTOK = int(os.environ.get("PERSTOK", "0"))
+NPP = 4
 NSP = 8
 SHIFTS = int(os.environ.get("SHIFTS", "2"))
 ENCL = int(os.environ.get("ENCL", "3"))
@@ -189,6 +191,44 @@ def static_path_tokens(rids):
         out.append(toks)
     return np.concatenate(out, 0)                        # (3*NSP, 18)
 
+PCACHE = {}
+def person_tokens(rids):
+    """(3*NPP, 18): Bartlett peaks of the TEMPLATE-SUBTRACTED product static
+    = the person's standing paths, parameterized (phi, psi, logp)."""
+    out = []
+    for ri, r in enumerate(rids):
+        if r in PCACHE:
+            t = PCACHE[r].copy()
+        else:
+            t = np.zeros((NPP, 18), np.float32)
+            f = f"{TOK}/statics/{r:06d}.npy"
+            if os.path.exists(f) and r in RIDMETA and RIDMETA[r] in TEMPLATES:
+                v = np.load(f)
+                loc = TEMPLATES[RIDMETA[r]][0]
+                res = v - loc
+                y = (res[171:285] + 1j * res[285:]).reshape(2, 57
+                                                            ).astype(np.complex64)
+                sb = np.stack([y[:, k:k + _L].reshape(-1)
+                               for k in range(57 - _L + 1)], 0)
+                P = (np.abs(sb @ _ST.conj().T) ** 2).mean(0)
+                order = np.argsort(-P)
+                picks = []
+                for j in order:
+                    if all(abs(int(_IPH[j]) - int(_IPH[k])) > 2 or
+                           abs(int(_IPS[j]) - int(_IPS[k])) > 2 for k in picks):
+                        picks.append(j)
+                    if len(picks) >= NPP: break
+                lp = np.log10(P[picks] + 1e-12)
+                zlp = (lp - lp.mean()) / (lp.std() + 1e-6)
+                for n, j in enumerate(picks):
+                    phi, psi = _PH[_IPH[j]], _PS[_IPS[j]]
+                    t[n, :7] = [np.sin(phi), np.cos(phi), np.sin(psi),
+                                np.cos(psi), -0.05, 0.5, zlp[n]]
+            PCACHE[r] = t.copy()
+        t2 = t.copy(); t2[:, 15 + ri] = 1.0
+        out.append(t2)
+    return np.concatenate(out, 0)
+
 SCACHE, RIDMETA, TEMPLATES = {}, {}, {}
 def _raw_static(r):
     f = f"{TOK}/statics/{r:06d}.npy"
@@ -285,10 +325,10 @@ def main():
     ho = [tr_all[i] for i in ix[int(len(ix) * 0.95):]]
     tr = [tr_all[i] for i in ix[:int(len(ix) * 0.95)]]
     print(f"train {len(tr)} / ho {len(ho)} / test-scene4 {len(te)}", flush=True)
-    if STATIC:
+    if STATIC or PERSTOK:
         while not os.path.exists(SMARK):
             print("waiting for statics ...", flush=True); time.sleep(60)
-        if TEMPL: build_templates()
+        if TEMPL or PERSTOK: build_templates()
     mu = np.zeros((NJ, 3)); sd = np.ones((NJ, 3))
     for j in range(NJ):
         vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
@@ -317,8 +357,10 @@ def main():
                     if STATIC else None
                 qs = torch.from_numpy(S12.astype(np.float32))[None].to(dev) \
                     if SLOTQ else None
-                spt = torch.from_numpy(SPt.astype(np.float32))[None].to(dev) \
-                    if STATTOK else None
+                spt = (torch.from_numpy(person_tokens(rids).astype(
+                    np.float32))[None].to(dev) if PERSTOK else
+                    (torch.from_numpy(SPt.astype(np.float32))[None].to(dev)
+                     if STATTOK else None))
                 pr = net(X, mask, [nw], st, qs, spt)[0, :len(P)].cpu().numpy()
                 pr = pr * sd_np + mu_np                   # de-normalize
                 r = mpjpe_pck(pr, P)
@@ -361,9 +403,12 @@ def main():
         Y = torch.full((B, max(nws), NJ, 3), np.nan)
         S = torch.zeros(B, 3, 399)
         QS = torch.zeros(B, max(nws), len(POSESLOTS) * 6 * 3)
-        SP = torch.zeros(B, 3 * NSP, 18)
+        nsp = 3 * (NPP if PERSTOK else NSP)
+        SP = torch.zeros(B, nsp, 18)
         for k, it in enumerate(items):
-            SP[k] = torch.from_numpy(it[5].astype(np.float32))
+            SP[k] = torch.from_numpy(
+                person_tokens(it[3]).astype(np.float32)) if PERSTOK \
+                else torch.from_numpy(it[5].astype(np.float32))
             X[k, :len(it[0])] = torch.from_numpy(it[0].astype(np.float32))
             mask[k, :len(it[0])] = False
             Y[k, :len(it[1])] = torch.from_numpy(it[1])
@@ -381,7 +426,7 @@ def main():
         QS, SP = QS.to(dev), SP.to(dev)
         pred = net(X, mask, nws, S if STATIC else None,
                    QS if SLOTQ else None,
-                   SP if STATTOK else None)               # in Z-space
+                   SP if (STATTOK or PERSTOK) else None)  # in Z-space
         Z = (Y - MUt) / SDt
         msk = torch.isfinite(Y).all(-1, keepdim=True)
         msk[:, :, ROOTJ] = False
