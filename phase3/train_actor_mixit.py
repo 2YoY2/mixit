@@ -54,6 +54,12 @@ def sanitize(c):
 
 def load_400(f):
     """raw mat -> sanitized additive CSI on the 400 Hz grid, (T,3,57) c64."""
+    try:
+        return _load_400(f)
+    except Exception:
+        return None
+
+def _load_400(f):
     with h5py.File(os.path.join(ROOT, f), "r") as h:
         c = h["csi/csi"][...]
         ts = h["csi/timestamp"][...].ravel().astype(np.float64)
