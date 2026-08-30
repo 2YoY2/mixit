@@ -29,6 +29,8 @@ B = int(os.environ.get("B", "32"))
 LR = float(os.environ.get("LR", "1e-3"))
 H = int(os.environ.get("H", "256"))
 SEED = int(os.environ.get("SEED", "0"))
+ARMS = os.environ.get("ARMS", "model,raw").split(",")
+DIAG = int(os.environ.get("DIAG", "0"))
 NJ = 15
 BANDS = [(2, 10), (10, 40), (40, 150)]
 RAWB = np.linspace(2, 150, 9)
@@ -123,7 +125,7 @@ def mpjpe(pred, gt):
     d = np.linalg.norm(np.nan_to_num(pred - gt), axis=-1)
     return float(d[m].mean() * 100)
 
-def run_arm(name, ai, tr, ho, te):
+def run_arm(name, ai, tr, ho, te, mu):
     fin = tr[0][ai].shape[1]
     head = Head(fin).to(dev)
     opt = torch.optim.Adam(head.parameters(), lr=LR)
@@ -156,6 +158,27 @@ def run_arm(name, ai, tr, ho, te):
                 pr = head(torch.from_numpy(F)[None].to(dev))[0].cpu().numpy()
                 errs.append(mpjpe(pr, P))
         return float(np.nanmedian(errs))
+    if DIAG:
+        JS = [j for j in range(NJ) if j != 8]
+        dm, sp, sg, tc, wins = [], [], [], [], []
+        with torch.no_grad():
+            for F_, R_, P in te:
+                F = F_ if ai == 0 else R_
+                pr = head(torch.from_numpy(F)[None].to(dev))[0].cpu().numpy()
+                m = np.isfinite(P).all(-1); m[:, 8] = False
+                if not m.any(): continue
+                dm.append(float(np.linalg.norm((pr - mu)[m], axis=-1).mean() * 100))
+                sp.append(float(pr[:, JS].std(0).mean() * 100))
+                sg.append(float(np.nanmean(np.nanstd(P[:, JS], 0)) * 100))
+                pd_ = (pr - pr.mean(0))[m]
+                gd = np.nan_to_num((P - np.nanmean(P, 0)))[m]
+                den = np.linalg.norm(pd_) * np.linalg.norm(gd) + 1e-9
+                tc.append(float((pd_ * gd).sum() / den))
+                wins.append(mpjpe(pr, P) < mpjpe(np.broadcast_to(mu, P.shape), P))
+        print(f"  DIAG[{name}] scene{TESC}: dist-to-meanpose {np.median(dm):.2f} cm"
+              f" | pred temporal-std {np.median(sp):.2f} vs GT {np.median(sg):.2f} cm"
+              f" | traj-corr {np.median(tc):+.3f}"
+              f" | paired-beats-baseline {np.mean(wins)*100:.0f}%", flush=True)
     return ev(ho), ev(te)
 
 TRSC = [int(s) for s in os.environ.get("TRSC", "1").split(",")]
@@ -184,7 +207,8 @@ base_te = float(np.nanmedian([mpjpe(np.broadcast_to(mu, P.shape), P)
 print(f"\nmean-pose baseline: scene1-ho {base_ho:.1f} cm | scene4 {base_te:.1f} cm",
       flush=True)
 for name, ai in (("model", 0), ("raw", 1)):
-    h, t = run_arm(name, ai, tr, ho, te)
+    if name not in ARMS: continue
+    h, t = run_arm(name, ai, tr, ho, te, mu)
     print(f"[{name:5s}] MPJPE scene1-ho {h:.1f} cm | scene4 {t:.1f} cm", flush=True)
 print("""
 READ: model < raw < baseline on scene 4 = the separator's output transfers
