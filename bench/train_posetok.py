@@ -21,7 +21,9 @@ STEPS = int(os.environ.get("STEPS", "40000"))
 B = int(os.environ.get("B", "12"))
 LR = float(os.environ.get("LR", "5e-4"))
 TMAX = int(os.environ.get("TMAX", "1600"))
-STATIC = int(os.environ.get("STATIC", "1"))
+STATIC = int(os.environ.get("STATIC", "0"))
+SLOTQ = int(os.environ.get("SLOTQ", "1"))
+POSESLOTS = [int(v) for v in os.environ.get("POSESLOTS", "1,2").split(",")]
 VELW = float(os.environ.get("VELW", "0.5"))
 SDROP = float(os.environ.get("SDROP", "0.3"))
 SWAP = float(os.environ.get("SWAP", "0.2"))
@@ -69,10 +71,24 @@ def rec_tok(rid, rx):
     with torch.no_grad():
         a = sep(torch.from_numpy(X7)[None].to(dev))[0].cpu().numpy()
     hot = np.zeros((len(t), 3), np.float32); hot[:, rx] = 1
-    return np.c_[X7, a.astype(np.float32), hot].astype(np.float16), nw
+    e = (10.0 ** le).astype(np.float64)
+    w = t[:, 0].astype(int)
+    st = np.zeros((nw, len(POSESLOTS) * 6), np.float64)
+    for si, m in enumerate(POSESLOTS):
+        wm = a[:, m] * e
+        den = np.zeros(nw); np.add.at(den, w, wm)
+        np.add.at(st[:, si * 6], w, wm)
+        for ci, v in enumerate((t[:, 1] / 150.0, np.sin(t[:, 2]),
+                                np.cos(t[:, 2]), np.sin(t[:, 3]),
+                                np.cos(t[:, 3]))):
+            acc = np.zeros(nw); np.add.at(acc, w, wm * v)
+            st[:, si * 6 + 1 + ci] = acc / np.maximum(den, 1e-9)
+    st[:, ::6] = np.log10(st[:, ::6] + 1e-9)
+    return (np.c_[X7, a.astype(np.float32), hot].astype(np.float16),
+            st.astype(np.float16), nw)
 
 def build(scenes):
-    cf = f"{TOK}/tokpose2_{'-'.join(map(str, scenes))}.pkl"
+    cf = f"{TOK}/tokpose3_{'-'.join(map(str, scenes))}.pkl"
     if os.path.exists(cf):
         return pickle.load(open(cf, "rb"))
     man = pd.read_csv(f"{TOK}/manifest.csv")
@@ -86,14 +102,15 @@ def build(scenes):
         if not os.path.exists(pf): continue
         ts = [rec_tok(r, i) for i, r in enumerate(rids)]
         if any(t is None for t in ts): continue
-        nw = min(t[1] for t in ts)
+        nw = min(t[2] for t in ts)
         tok = np.concatenate([t[0] for t in ts], 0)
         if len(tok) > TMAX:
             keep = np.argsort(-tok[:, 6].astype(np.float32))[:TMAX]
             tok = tok[keep]
+        S12 = np.concatenate([t[1][:nw] for t in ts], 1)
         P = np.asarray(np.load(pf), np.float32)[:nw]
         if not np.isfinite(P).any(): continue
-        out.append((tok, P, nw, rids))
+        out.append((tok, P, nw, rids, S12))
         if len(out) % 1000 == 0: print(f"  s{scenes}: {len(out)}", flush=True)
     pickle.dump(out, open(cf, "wb"), protocol=4)
     return out
@@ -140,12 +157,12 @@ class PoseTok(nn.Module):
         lay = nn.TransformerEncoderLayer(H, 4, 2 * H, batch_first=True,
                                          norm_first=True, dropout=0.1)
         self.enc = nn.TransformerEncoder(lay, 3)
-        self.qproj = nn.Linear(64, H)
+        self.qproj = nn.Linear(64 + (len(POSESLOTS) * 6 * 3 if SLOTQ else 0), H)
         self.att = nn.MultiheadAttention(H, 4, batch_first=True)
         self.ff = nn.Sequential(nn.Linear(H, 2 * H), nn.GELU(),
                                 nn.Linear(2 * H, H))
         self.out = nn.Linear(H, NJ * 3)
-    def forward(self, x, mask, nws, st=None):
+    def forward(self, x, mask, nws, st=None, qs=None):
         h = self.inp(x) + self.type_emb[0]
         if st is not None:
             sh = self.sinp(st) + self.type_emb[1]        # (B, 3, H)
@@ -158,6 +175,8 @@ class PoseTok(nn.Module):
         k = torch.arange(32, device=x.device).float()[None, None, :]
         q = torch.cat([torch.sin(tt / 20 * (k + 1)), torch.cos(tt / 20 * (k + 1))],
                       -1).expand(B_, -1, -1)
+        if SLOTQ and qs is not None:
+            q = torch.cat([q, qs], -1)
         q = self.qproj(q)
         o, _ = self.att(q, h, h, key_padding_mask=mask)
         o = o + self.ff(o)
@@ -185,11 +204,11 @@ def main():
     mu = np.zeros((NJ, 3)); sd = np.ones((NJ, 3))
     for j in range(NJ):
         vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
-                             for _, P, _, _ in tr if np.isfinite(P[:, j]).any()])
+                             for _, P, _, _, _ in tr if np.isfinite(P[:, j]).any()])
         if len(vs): mu[j] = vs.mean(0); sd[j] = vs.std(0) + 1e-3
     MUt = torch.from_numpy(mu.astype(np.float32)).to(dev)
     SDt = torch.from_numpy(sd.astype(np.float32)).to(dev)
-    bt = [mpjpe_pck(np.broadcast_to(mu, P.shape), P) for _, P, _, _ in te]
+    bt = [mpjpe_pck(np.broadcast_to(mu, P.shape), P) for _, P, _, _, _ in te]
     bt = np.array([r for r in bt if r])
     print(f"mean-pose baseline scene4: MPJPE {bt[:,0].mean():.0f} mm  "
           f"PCK@20 {bt[:,1].mean()*100:.1f}  PCK@50 {bt[:,2].mean()*100:.1f}",
@@ -203,12 +222,14 @@ def main():
         rs, ratio, tc = [], [], []
         mu_np, sd_np = MUt.cpu().numpy(), SDt.cpu().numpy()
         with torch.no_grad():
-            for tok, P, nw, rids in ds[:cap]:
+            for tok, P, nw, rids, S12 in ds[:cap]:
                 X = torch.from_numpy(tok.astype(np.float32))[None].to(dev)
                 mask = torch.zeros(1, len(tok), dtype=torch.bool, device=dev)
                 st = torch.from_numpy(get_static(rids))[None].to(dev) \
                     if STATIC else None
-                pr = net(X, mask, [nw], st)[0, :len(P)].cpu().numpy()
+                qs = torch.from_numpy(S12.astype(np.float32))[None].to(dev) \
+                    if SLOTQ else None
+                pr = net(X, mask, [nw], st, qs)[0, :len(P)].cpu().numpy()
                 pr = pr * sd_np + mu_np                   # de-normalize
                 r = mpjpe_pck(pr, P)
                 if r: rs.append(r)
@@ -244,10 +265,12 @@ def main():
         mask = torch.ones(B, n, dtype=torch.bool)
         Y = torch.full((B, max(nws), NJ, 3), np.nan)
         S = torch.zeros(B, 3, 399)
+        QS = torch.zeros(B, max(nws), len(POSESLOTS) * 6 * 3)
         for k, it in enumerate(items):
             X[k, :len(it[0])] = torch.from_numpy(it[0].astype(np.float32))
             mask[k, :len(it[0])] = False
             Y[k, :len(it[1])] = torch.from_numpy(it[1])
+            QS[k, :len(it[4])] = torch.from_numpy(it[4].astype(np.float32))
             if STATIC:
                 u = rng.random()
                 if u < SDROP:
@@ -258,7 +281,9 @@ def main():
                 else:
                     S[k] = torch.from_numpy(get_static(it[3]))
         X, mask, Y, S = X.to(dev), mask.to(dev), Y.to(dev), S.to(dev)
-        pred = net(X, mask, nws, S if STATIC else None)   # in Z-space
+        QS = QS.to(dev)
+        pred = net(X, mask, nws, S if STATIC else None,
+                   QS if SLOTQ else None)                 # in Z-space
         Z = (Y - MUt) / SDt
         msk = torch.isfinite(Y).all(-1, keepdim=True)
         msk[:, :, ROOTJ] = False
