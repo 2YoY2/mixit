@@ -184,10 +184,9 @@ def main():
                   f"{(time.time()-t0)/3600:.2f}h", flush=True)
         if step % 2000 == 0 and step > 0:
             net.eval()
-            h = qev(ho); t = qev(te)
-            print(f"  EVAL [{step}] heldout MPJPE {h[0]:.0f} mm "
-                  f"PCK20/50 {h[1]:.0f}/{h[2]:.0f} | scene4 MPJPE {t[0]:.0f} mm "
-                  f"PCK20/50 {t[1]:.0f}/{t[2]:.0f}"
+            h = qev(ho)
+            print(f"  EVAL [{step}] heldout: MPJPE {h[0]:.0f} mm  "
+                  f"PCK@20 {h[1]:.1f}%  PCK@50 {h[2]:.1f}%"
                   f"{'  (best)' if h[0] < best else ''}", flush=True)
             torch.save({"model": net.state_dict(), "step": step},
                        f"{OUTD}/last.pt")
@@ -195,6 +194,12 @@ def main():
                 best = h[0]
                 torch.save({"model": net.state_dict(), "step": step},
                            f"{OUTD}/best.pt")
+            if step % 5000 == 0:
+                t = qev(te, cap=len(te))
+                print(f"  TEST4 [{step}] scene4 FULL (n={len(te)}): "
+                      f"MPJPE {t[0]:.0f} mm  PCK@20 {t[1]:.1f}%  "
+                      f"PCK@50 {t[2]:.1f}%   [paper x-scene: 181.5 / 44.2 / 79.5]",
+                      flush=True)
             net.train()
     net.eval()
     def ev(ds, tag):
