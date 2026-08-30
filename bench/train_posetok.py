@@ -6,7 +6,8 @@ Reports MPJPE (mm) + PCK@20/50 (root-relative) vs mean-pose baseline.
 
   HOURS=1 python3 bench/train_posetok.py
 """
-import os, time, pickle
+import os, time, pickle, warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 import numpy as np
 import pandas as pd
 import torch
@@ -190,8 +191,9 @@ def main():
                 m = np.isfinite(P).all(-1); m[:, ROOTJ] = False
                 if m.sum() > NJ:
                     js = [j for j in range(NJ) if j != ROOTJ]
-                    ratio.append(pr[:, js].std(0).mean()
-                                 / (np.nanstd(P[:, js], 0).mean() + 1e-9))
+                    gs = np.nanmean(np.nanstd(P[:, js], 0))
+                    if np.isfinite(gs) and gs > 1e-9:
+                        ratio.append(float(np.nanmean(pr[:, js].std(0)) / gs))
                     pd_ = (pr - pr.mean(0))[m]
                     gd = np.nan_to_num(P - np.nanmean(P, 0))[m]
                     den = np.linalg.norm(pd_) * np.linalg.norm(gd) + 1e-9
@@ -234,7 +236,7 @@ def main():
         torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
         opt.step()
         if step % 500 == 0:
-            print(f"[{step}] L1 {loss.item()*1000:.1f} mm "
+            print(f"[{step}] L1z {loss.item():.3f} (do-nothing=1.0) "
                   f"{(time.time()-t0)/3600:.2f}h", flush=True)
         if step % 2000 == 0 and step > 0:
             net.eval()
