@@ -28,7 +28,9 @@ LR = float(os.environ.get("LR", "3e-4"))
 NSLOTS = int(os.environ.get("NSLOTS", "8"))
 WIDTH = int(os.environ.get("WIDTH", "256"))
 NBLOCKS = int(os.environ.get("NBLOCKS", "8"))
-LIMBW = float(os.environ.get("LIMBW", "0.5"))
+LIMBW = float(os.environ.get("LIMBW", "0.25"))
+TEACHW = float(os.environ.get("TEACHW", "1.0"))
+MIXW = float(os.environ.get("MIXW", "0.2"))
 TAU = float(os.environ.get("TAU", "1e-3"))
 EVERY = int(os.environ.get("EVERY", "2500"))
 NEVAL = int(os.environ.get("NEVAL", "120"))
@@ -107,6 +109,9 @@ class Pairs(Dataset):
         self.gt = {int(r): f"{TOK}/imu/{int(r):06d}.npy"
                    for r in meta.rid.values
                    if os.path.exists(f"{TOK}/imu/{int(r):06d}.npy")}
+        self.tenv = {int(r): f"{TOK}/tenv/{int(r):06d}.npy"
+                     for r in meta.rid.values
+                     if os.path.exists(f"{TOK}/tenv/{int(r):06d}.npy")}
         self.seed = seed
     def __len__(self): return 10 ** 9
     def __getitem__(self, i):
@@ -127,9 +132,19 @@ class Pairs(Dataset):
                 gg = np.asarray(np.load(gf), np.float32)
                 if len(gg) >= s0a + WIN:
                     gi = gg[s0a:s0a + WIN, :5]; ok = 1.0
-            return Xa, Xb, gi, ok
+            nwc = (WIN - WINF) // HOPF + 1
+            tv = np.zeros((8, nwc), np.float32); tok_ = 0.0
+            tf_ = self.tenv.get(int(ra))
+            if tf_:
+                te_ = np.asarray(np.load(tf_), np.float32)
+                w0 = s0a // HOPF
+                if te_.shape[1] >= w0 + nwc:
+                    tv = te_[:, w0:w0 + nwc]; tok_ = 1.0
+            return Xa, Xb, gi, ok, tv, tok_
         z = np.zeros((CIN, WIN), np.float32)
-        return z, z, np.zeros((WIN, 5), np.float32), 0.0
+        nwc = (WIN - WINF) // HOPF + 1
+        return (z, z, np.zeros((WIN, 5), np.float32), 0.0,
+                np.zeros((8, nwc), np.float32), 0.0)
 
 class Block(nn.Module):
     def __init__(self, w, d):
@@ -202,6 +217,16 @@ def pit_env_loss(y, gi, ok):
             best = v if best is None else torch.maximum(best, v)
     return (1.0 - best).mean()
 
+def teach_loss(y, tv, tok_):
+    """slot-k student envelope matches slot-k TEACHER envelope. No perm."""
+    env = slot_envs_t(y)                                   # (B,N,nw)
+    nw = min(env.shape[-1], tv.shape[-1])
+    env, tv = env[..., :nw], tv[..., :nw]
+    live = (tok_ > 0.5) & (tv.var(-1).sum(1) > 1e-10)
+    if live.sum() == 0: return y.new_zeros(())
+    c = tcorr(env[live], tv[live])                         # (b,N)
+    return (1.0 - c).mean()
+
 def main():
     os.makedirs(RUNS, exist_ok=True)
     model = Sep()
@@ -243,22 +268,24 @@ def main():
         step0 = ck["step"]; best = ck.get("best", -1e9)
         print(f"resumed step {step0}", flush=True)
     t0 = time.time()
-    for step, (Xa, Xb, gi, ok) in enumerate(dl, start=step0):
+    for step, (Xa, Xb, gi, ok, tv, tok_) in enumerate(dl, start=step0):
         if step >= STEPS or (time.time() - t0) / 3600 > HOURS: break
         Xa, Xb = Xa.to(dev, non_blocking=True), Xb.to(dev, non_blocking=True)
-        gi, ok = gi.to(dev), ok.to(dev)
+        gi, ok, tv, tok_ = gi.to(dev), ok.to(dev), tv.to(dev), tok_.to(dev)
         mom = Xa + Xb
         y = model(mom)
         Lm = mixit_loss(y, Xa, Xb)
         ya = model(Xa)
         Lp = pit_env_loss(ya, gi, ok)
-        loss = Lm + LIMBW * Lp
+        Lt = teach_loss(ya, tv, tok_)
+        loss = TEACHW * Lt + MIXW * Lm + LIMBW * Lp
         opt.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         opt.step()
         if step % 200 == 0:
-            print(f"[{step}] mixit {Lm.item():+.2f} pit {Lp.item():.3f} "
-                  f"{(time.time()-t0)/3600:.2f}h", flush=True)
+            print(f"[{step}] teach {Lt.item():.3f} mixit {Lm.item():+.2f} "
+                  f"pit {Lp.item():.3f} {(time.time()-t0)/3600:.2f}h",
+                  flush=True)
         if step % EVERY == 0 and step > step0:
             model.eval()
             mm, nn_ = [], []
