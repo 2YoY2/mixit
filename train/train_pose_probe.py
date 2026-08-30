@@ -158,9 +158,14 @@ def run_arm(name, ai, tr, ho, te):
         return float(np.nanmedian(errs))
     return ev(ho), ev(te)
 
-print(f"frozen sep: {CKPT} step {ck['step']} | building clip sets", flush=True)
-tr_all = build(1)
-te = build(4)
+TRSC = [int(s) for s in os.environ.get("TRSC", "1").split(",")]
+TESC = int(os.environ.get("TESC", "4"))
+print(f"frozen sep: {CKPT} step {ck['step']} | building clip sets "
+      f"(train scenes {TRSC} -> test scene {TESC})", flush=True)
+tr_all = []
+for s in TRSC:
+    tr_all += build(s)
+te = build(TESC)
 rng = np.random.default_rng(SEED)
 ix = rng.permutation(len(tr_all))
 ho = [tr_all[i] for i in ix[int(len(ix) * 0.9):]]
