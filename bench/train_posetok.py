@@ -88,7 +88,8 @@ def rec_tok(rid, rx):
             st.astype(np.float16), nw)
 
 def build(scenes):
-    cf = f"{TOK}/tokpose3_{'-'.join(map(str, scenes))}.pkl"
+    slottag = "".join(map(str, POSESLOTS))
+    cf = f"{TOK}/tokpose3s{slottag}_{'-'.join(map(str, scenes))}.pkl"
     if os.path.exists(cf):
         return pickle.load(open(cf, "rb"))
     man = pd.read_csv(f"{TOK}/manifest.csv")
