@@ -202,6 +202,13 @@ def main():
         return (rs[:, 0].mean(), rs[:, 1].mean() * 100, rs[:, 2].mean() * 100,
                 np.median(ratio), np.median(tc))
     best = 1e9
+    if os.path.exists(f"{OUTD}/last.pt"):
+        ckr = torch.load(f"{OUTD}/last.pt", map_location=dev,
+                         weights_only=False)
+        net.load_state_dict(ckr["model"])
+        if "opt" in ckr: opt.load_state_dict(ckr["opt"])
+        best = ckr.get("best", 1e9)
+        print(f"resumed from step {ckr['step']} (best {best:.0f})", flush=True)
     t0 = time.time()
     for step in range(STEPS):
         if (time.time() - t0) / 3600 > HOURS: break
@@ -245,8 +252,8 @@ def main():
                   f"PCK@20 {h[1]:.1f}%  PCK@50 {h[2]:.1f}%  "
                   f"std-ratio {h[3]:.2f}  traj-corr {h[4]:+.2f}"
                   f"{'  (best)' if h[0] < best else ''}", flush=True)
-            torch.save({"model": net.state_dict(), "step": step},
-                       f"{OUTD}/last.pt")
+            torch.save({"model": net.state_dict(), "opt": opt.state_dict(),
+                        "step": step, "best": best}, f"{OUTD}/last.pt")
             if h[0] < best:
                 best = h[0]
                 torch.save({"model": net.state_dict(), "step": step},
