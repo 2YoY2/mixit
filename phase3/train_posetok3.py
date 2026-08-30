@@ -35,6 +35,8 @@ LAGFIX = int(os.environ.get("LAGFIX", "0"))
 STATTOK = int(os.environ.get("STATTOK", "0"))
 PERSTOK = int(os.environ.get("PERSTOK", "0"))
 TOKOFF = int(os.environ.get("TOKOFF", "0"))   # mask ALL motion tokens
+EVERY = int(os.environ.get("EVERY", "2000"))
+TEVERY = int(os.environ.get("TEVERY", "5000"))
 NPP = 4
 NSP = 8
 SHIFTS = int(os.environ.get("SHIFTS", "2"))
@@ -462,7 +464,7 @@ def main():
         if step % 500 == 0:
             print(f"[{step}] L1z {loss.item():.3f} (do-nothing=1.0) "
                   f"{(time.time()-t0)/3600:.2f}h", flush=True)
-        if step % 2000 == 0 and step > 0:
+        if step % EVERY == 0 and step > 0:
             net.eval()
             h = qev(ho)
             print(f"  EVAL [{step}] heldout: MPJPE {h[0]:.0f} mm  "
@@ -475,7 +477,7 @@ def main():
                 best = h[0]
                 torch.save({"model": net.state_dict(), "step": step},
                            f"{OUTD}/best.pt")
-            if step % 5000 == 0:
+            if step % TEVERY == 0:
                 t = qev(te, cap=len(te))
                 print(f"  TEST4 [{step}] scene4 FULL (n={len(te)}): "
                       f"MPJPE {t[0]:.0f} mm  PCK@20 {t[1]:.1f}%  "
