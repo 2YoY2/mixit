@@ -1,4 +1,12 @@
-# mixit — Phase 2 handoff
+# mixit
+
+**Phase 2 working pipeline: [`phase2/`](phase2/) — raw CSI → MUSIC tokens →
+identity-free limb clustering. Gate passed on unseen rooms (gap +0.723, 99%
+vs control). See [phase2/README.md](phase2/README.md).**
+Probes 23–28 in [`diagnostics/`](diagnostics/) document the investigation
+that led there. Phase-1 code: [`archive2/`](archive2/).
+
+# Phase 2 original handoff (2026-08-30)
 
 WiFi CSI sensing on **PerceptAlign**. Written 2026-08-30 for whoever (human or
 model) continues. Phase-1 code lives in `archive2/` here; phase-1 results and
