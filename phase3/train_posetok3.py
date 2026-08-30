@@ -34,6 +34,7 @@ HDIM = int(os.environ.get("HDIM", "128"))
 LAGFIX = int(os.environ.get("LAGFIX", "0"))
 STATTOK = int(os.environ.get("STATTOK", "0"))
 PERSTOK = int(os.environ.get("PERSTOK", "0"))
+TOKOFF = int(os.environ.get("TOKOFF", "0"))   # mask ALL motion tokens
 NPP = 4
 NSP = 8
 SHIFTS = int(os.environ.get("SHIFTS", "2"))
@@ -352,7 +353,8 @@ def main():
         with torch.no_grad():
             for tok, P, nw, rids, S12, SPt in ds[:cap]:
                 X = torch.from_numpy(tok.astype(np.float32))[None].to(dev)
-                mask = torch.zeros(1, len(tok), dtype=torch.bool, device=dev)
+                mask = torch.full((1, len(tok)), bool(TOKOFF),
+                                  dtype=torch.bool, device=dev)
                 st = torch.from_numpy(get_static(rids))[None].to(dev) \
                     if STATIC else None
                 qs = torch.from_numpy(S12.astype(np.float32))[None].to(dev) \
@@ -422,6 +424,7 @@ def main():
                     S[k] = torch.from_numpy(get_static(oth[3]))
                 else:
                     S[k] = torch.from_numpy(get_static(it[3]))
+        if TOKOFF: mask[:, :] = True
         X, mask, Y, S = X.to(dev), mask.to(dev), Y.to(dev), S.to(dev)
         QS, SP = QS.to(dev), SP.to(dev)
         pred = net(X, mask, nws, S if STATIC else None,
