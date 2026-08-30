@@ -1,0 +1,836 @@
+%% Per-limb WiFi CSI separation without limb identity
+%% IEEE conference format (IEEEtran). Compile:
+%%   pdflatex phase2_ieee && bibtex phase2_ieee && pdflatex phase2_ieee x2
+%% A self-contained thebibliography is also included at the end; to use the
+%% .bib instead, comment that block and uncomment the \bibliography lines.
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{url}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+%% Marks the slots deliberately left empty until the results pass.
+\newcommand{\resultslot}[1]{\textcolor{red}{[\,#1\,]}}
+
+\begin{document}
+
+\title{Per-Limb Separation of WiFi Channel State Information\\
+Without Limb Identity}
+
+\author{\IEEEauthorblockN{Author Name}
+\IEEEauthorblockA{\textit{Affiliation} \\
+\textit{Institution}\\
+City, Country \\
+email@domain}
+}
+
+\maketitle
+
+\begin{abstract}
+Commodity WiFi sensing has progressed from coarse activity recognition to
+full-body pose estimation, but decomposing the received channel into
+\emph{per-limb} components remains open. We separate two questions that prior
+work conflates: whether a room-stable spatial signature exists that
+\emph{identifies} which limb produced a component, and whether the signal can
+be \emph{partitioned} into limb-coherent components without ever naming them.
+For the first question we build three instruments of increasing power on a
+five-room, three-receiver dataset: a non-parametric subcarrier-by-antenna
+signature, a coherent MUSIC estimator over a cross-antenna representation that
+preserves angle-of-arrival, and a Doppler-gated joint estimator following the
+multi-dimensional tracking literature. For the second, we adopt the
+deep-clustering premise from speech separation---grouping time--frequency bins
+requires no source identity, with the permutation resolved afterwards---and
+build a full pipeline: a tokeniser that reduces each recording to a set of
+time--frequency tokens carrying Doppler, angle, and delay coordinates, obtained
+with Slepian multitaper analysis and an exact fast MUSIC evaluation; a
+zero-learning clustering test with a matched-permutation null; and a set
+transformer trained with two identity-free objectives, an
+envelope permutation-invariant loss against keypoint-derived limb references
+and a mixture-invariant origin loss requiring no labels at all. Models are
+trained on three rooms and gated on two rooms never seen, always against a
+paired zero-learning control. \resultslot{results summary}
+\end{abstract}
+
+\begin{IEEEkeywords}
+WiFi sensing, channel state information, source separation, deep clustering,
+micro-Doppler, MUSIC, multitaper, human pose estimation
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+WiFi channel state information (CSI) reacts to human motion, and a decade of
+work has turned that reaction into increasingly fine-grained perception: from
+activity classification~\cite{wang2015carm} and through-wall
+localisation~\cite{adib2013seethrough}, to gesture recognition that transfers
+across environments~\cite{zheng2019widar3}, to dense body
+perception~\cite{wang2019personinwifi,geng2022densepose} and multi-person 3D
+pose~\cite{yan2024personinwifi3d,perceptalign2026}. Each step has narrowed the
+spatial scale at which the signal is interpreted.
+
+The natural limit of that progression is a \emph{per-limb} decomposition: given
+the CSI recorded while a person moves, produce one component stream per moving
+body part. Such a decomposition would be the WiFi analogue of source separation
+in audio, and it would provide a representation on which downstream tasks could
+be built without re-learning the physics each time.
+
+The obstacle is usually stated as a resolution problem. A wrist is a weak
+scatterer a few tens of centimetres from the torso; a commodity receiver with
+three antennas provides two coherent baselines, whose angular resolving power
+is far coarser than the angle a limb subtends at typical indoor ranges. On that
+reading, per-limb decomposition awaits better hardware.
+
+We argue the problem statement hides two different questions:
+
+\begin{enumerate}
+\item \textbf{Identification.} Does there exist a signature---in the
+subcarrier, antenna, angle, or delay domain---that is stable across rooms and
+says \emph{which} limb produced a given component?
+\item \textbf{Separation.} Can the signal be partitioned into limb-coherent
+components \emph{without} such a signature, with the correspondence between
+components and limbs resolved only afterwards?
+\end{enumerate}
+
+Speech separation settled the analogous distinction. Deep
+clustering~\cite{hershey2016deep} trains embeddings of time--frequency bins
+under an objective that says only ``bins of the same source should be close'',
+never which speaker a source is; at test time the bins are clustered per
+mixture and the outputs matched to references afterwards. The method separates
+speakers it has never heard, and its successors keep the
+principle~\cite{zeghidour2021wavesplit}. Two same-pitch talkers have no stable
+identifying signature either, yet they separate---because within one mixture
+their bins differ in local structure. Identification is sufficient for
+separation, not necessary for it.
+
+This paper takes both questions in turn on a five-room, three-receiver dataset
+with synchronised 3D keypoints~\cite{perceptalign2026}. The contributions are
+methodological:
+
+\begin{itemize}
+\item A precise account (Sec.~\ref{sec:model}) of what the commonly used
+\emph{island} CSI representation---products of adjacent subcarriers within an
+antenna---discards, and a cross-antenna alternative that cancels the same
+per-packet impairments while preserving angle-of-arrival and the full delay
+aperture.
+\item A normalisation rule for the spectral domain (Sec.~\ref{sec:norm}):
+because multipath superposes additively in the channel frequency response, the
+static room must be \emph{subtracted}, and only its \emph{magnitude} divided
+out, so that the phase ramps encoding angle and delay survive normalisation.
+\item Three identification probes of increasing power (Sec.~\ref{sec:id}),
+ending with a Doppler-gated joint (angle, delay, Doppler) estimator in the
+spirit of mD-Track~\cite{xie2019mdtrack} and Widar2.0~\cite{qian2018widar2},
+each with matched nulls and intensity controls.
+\item An identity-free separation pipeline (Sec.~\ref{sec:sep}): a token
+representation of each recording obtained by Slepian multitaper
+analysis~\cite{thomson1982multitaper,slepian1978dpss} and per-bin
+MUSIC~\cite{schmidt1986music} with an exact fast evaluation; a zero-learning
+clustering feasibility test with a matched-permutation null; and a set
+transformer trained by an envelope permutation-invariant loss and a
+mixture-invariant~\cite{wisdom2020mixit} origin loss.
+\item A transfer protocol (Sec.~\ref{sec:transfer}) that asks whether the
+separator's frozen output is a universal representation, by training a small
+pose head on it and testing in an unseen room against both a raw-feature arm
+and a mean-pose floor.
+\end{itemize}
+
+Every reported test number is measured in rooms excluded from all fitting, and
+every learned number is reported beside a zero-learning control evaluated on
+the same recordings.
+
+\section{Related Work}
+
+\subsection{WiFi sensing and body perception}
+
+CARM~\cite{wang2015carm} related CSI variation to body motion through a
+speed--frequency model, establishing micro-Doppler as the natural domain for
+activity sensing. Widar~\cite{qian2017widar} and Widar2.0~\cite{qian2018widar2}
+turned Doppler into passive tracking, and Widar3.0~\cite{zheng2019widar3}
+introduced body-coordinate velocity profiles as a domain-independent feature,
+recognising that raw CSI statistics are tied to deployment geometry. Person-in-
+WiFi~\cite{wang2019personinwifi}, DensePose-from-WiFi~\cite{geng2022densepose},
+and multi-person 3D pose~\cite{yan2024personinwifi3d} regress body
+representations directly. The dataset used here~\cite{perceptalign2026}
+addresses cross-layout generalisation by conditioning on calibrated transceiver
+geometry. None of this line produces a per-component decomposition of the
+signal itself; the body is recovered as a regression target rather than as
+separated sources.
+
+\subsection{Multipath parameter estimation}
+
+SpotFi~\cite{kotaru2015spotfi} applied MUSIC~\cite{schmidt1986music} with
+spatial smoothing~\cite{shan1985smoothing} to joint angle--delay estimation on
+commodity cards. Dynamic-MUSIC~\cite{li2016dynamicmusic} and
+IndoTrack~\cite{li2017indotrack} exploit the Doppler dimension to isolate paths
+reflected by a moving body from the static background, and
+mD-Track~\cite{xie2019mdtrack} makes the argument general: paths that are
+unresolvable in any single dimension become separable in the joint
+(angle, delay, Doppler) space, because ambiguity in one dimension is broken by
+another. Our Sec.~\ref{sec:dopplergated} applies exactly this correction to our
+own Sec.~\ref{sec:coherent} estimator, and Sec.~\ref{sec:token} carries the
+joint-space estimate into a per-bin tokeniser.
+
+Cancelling the per-packet carrier and sampling frequency offsets of commodity
+hardware~\cite{halperin2011tool} is a prerequisite for any coherent processing.
+Two standard devices exist: differencing along the subcarrier axis within one
+antenna, and taking ratios or conjugate products \emph{across} antennas of one
+receiver~\cite{li2017indotrack,zeng2019farsense}. Both cancel the offsets
+exactly, since they are common to all subcarriers and all antennas of a
+receiver; they differ in what else they cancel, which Sec.~\ref{sec:islands}
+makes explicit.
+
+\subsection{Separation without identity}
+
+DUET~\cite{yilmaz2004duet} separates audio mixtures by clustering
+time--frequency bins on their inter-channel delay and attenuation, assuming
+approximate disjointness of sources in the time--frequency plane; the cluster
+identities are arbitrary. Deep clustering~\cite{hershey2016deep} replaces the
+hand-designed bin coordinates with learned embeddings under a
+class-independent objective, and Wavesplit~\cite{zeghidour2021wavesplit}
+resolves the permutation problem by clustering per-frame speaker
+representations. Permutation-invariant training~\cite{yu2017pit} makes the same
+idea a loss, and mask-based models operating in the time--frequency
+domain~\cite{wang2023tfgridnet} or on learned
+bases~\cite{luo2019convtasnet} provide the architectures.
+
+When isolated sources are unavailable, mixture-invariant
+training~\cite{wisdom2020mixit} learns separation from mixtures alone by
+requiring that estimated sources can be re-grouped to reconstruct each
+constituent mixture; RemixIT~\cite{tzinis2022remixit} extends the family to
+continual self-training. This matters here because isolated single-limb
+recordings do not exist and cannot be collected without instrumenting the body:
+supervised separation targets are unavailable \emph{in principle}, not merely
+in practice.
+
+\section{Signal Model and Representation}
+\label{sec:model}
+
+\subsection{Measurement model}
+
+For a receiver with $A$ antennas and $S$ subcarriers, the measured CSI at
+packet time $t$ is
+\begin{equation}
+\hat{H}_{a,s}(t) = g(t)\, e^{\,j(\alpha(t) + \beta(t)s + \theta_a)}
+\, H_{a,s}(t) + n_{a,s}(t),
+\label{eq:measmodel}
+\end{equation}
+where $g(t)$ is the automatic gain, $\alpha(t)$ the carrier frequency offset,
+$\beta(t)$ the sampling frequency offset slope, $\theta_a$ the per-antenna
+phase (carrying angle of arrival), and $H$ the propagation channel. Crucially,
+$g$, $\alpha$, and $\beta$ are properties of the receiver chain and are
+\emph{common to all antennas} of one card~\cite{halperin2011tool}, since a
+single oscillator and sampling clock serve them.
+
+The propagation channel superposes paths,
+\begin{equation}
+H_{a,s}(t) = \underbrace{\textstyle\sum_{k\in\mathcal{S}} \gamma_k
+e^{-j2\pi f_s \tau_k} e^{-j\psi_{a,k}}}_{\text{static: room}}
++ \underbrace{\textstyle\sum_{k\in\mathcal{D}(t)} \gamma_k(t)
+e^{-j2\pi f_s \tau_k(t)} e^{-j\psi_{a,k}(t)}}_{\text{dynamic: person}},
+\label{eq:paths}
+\end{equation}
+so the room and the person add rather than multiply---a fact that dictates the
+normalisation rule of Sec.~\ref{sec:norm}.
+
+\subsection{The island representation and what it discards}
+\label{sec:islands}
+
+A widely used sanitisation forms products of \emph{adjacent subcarriers within
+one antenna},
+\begin{equation}
+z_{a,s}(t) = \hat{H}_{a,s}(t)\,\hat{H}^{*}_{a,s+1}(t),
+\end{equation}
+which we call the \emph{island} representation. Substituting
+\eqref{eq:measmodel}, the common terms cancel: $\alpha(t)$ exactly, and
+$\beta(t)s$ down to a constant removed by a subsequent detrend. The resulting
+stream is temporally coherent and is what earlier stages of this project used.
+
+The same difference, however, cancels every quantity that is constant across
+the subcarrier index of one antenna---including $\theta_a$. No pair of entries
+in the island stream relates antenna $a$ to antenna $b$, so angle of arrival is
+not merely attenuated but \emph{absent}; and the SFO detrend additionally
+flattens the delay ramp. Cleaning and normalisation are not responsible for
+this loss: it is a property of the representation. This observation motivates
+the alternative below and explains why identification probes on island streams
+(Sec.~\ref{sec:sigprobe}) cannot be read as evidence about the spatial domain.
+
+\subsection{Coherent cross-antenna representation}
+
+We form instead the conjugate products across antennas of one receiver,
+\begin{equation}
+y_{a,s}(t) = \hat{H}_{a,s}(t)\,\hat{H}^{*}_{1,s}(t),\qquad a = 2,\dots,A,
+\label{eq:coherent}
+\end{equation}
+following the CSI-ratio family~\cite{li2017indotrack,zeng2019farsense}. Since
+$g$, $\alpha$, and $\beta$ are common across antennas, they cancel exactly, as
+in the island form; but $\theta_a - \theta_1$ survives, so angle of arrival
+remains observable, and no subcarriers are consumed by the operation, so the
+full delay aperture is retained. With $A = 3$ and $S = 57$ this yields a
+$(T, 2, 57)$ complex stream per receiver: two coherent baselines by
+fifty-seven subcarriers.
+
+\subsection{Cleaning}
+\label{sec:clean}
+
+The following is applied whenever \eqref{eq:coherent} is built.
+
+\emph{Rate recovery.} Packet rate is derived from timestamps, never assumed:
+the median timestamp increment is tested against unit scales
+$\{1, 10^{-3}, 10^{-6}, 10^{-9}\}$\,s and the scale placing the rate in
+$[100, 5000]$\,Hz adopted. Non-monotonic samples are dropped and recordings
+shorter than \SI{2}{\second} rejected.
+
+\emph{Gain removal.} Each packet is divided by
+$g(t) = \sqrt{\mathrm{mean}_{a,s}|\hat H_{a,s}(t)|^2}$, a real positive scalar,
+so phases are untouched. This precedes \eqref{eq:coherent}, which would
+otherwise square any residual gain variation.
+
+\emph{Resampling.} The complex products are binned onto a uniform
+\SI{400}{\hertz} grid; empty bins are nearest-neighbour filled and a recording
+is rejected if more than \SI{35}{\percent} of bins are empty.
+
+\subsection{Normalisation in the spectral domain}
+\label{sec:norm}
+
+By \eqref{eq:paths} the static room enters additively. The normalisation must
+therefore \emph{subtract} it. Division by the complex static---the
+cepstral-mean analogue borrowed from speech~\cite{chen2018cepstral} and used in
+the earlier phase of this work---does remove the room and equalise gain, but it
+rotates every element by $-\arg S(e)$, destroying precisely the phase ramps
+across subcarriers and antennas that encode delay and angle. We therefore use
+the phase-safe form: with $e = (a, s)$ indexing the coherent aperture,
+\begin{align}
+S(e) &= \tfrac{1}{T}\textstyle\sum_t y_e(t), \\
+g(e) &= \max\!\big(|S(e)|,\; 0.05\cdot\mathrm{median}_e |S(e)|\big), \\
+\tilde D_e(t) &= \big(y_e(t) - S(e)\big) \,/\, g(e).
+\label{eq:phasesafe}
+\end{align}
+Subtraction removes the room exactly and leaves the dynamic term's complex
+structure intact; the division is by a real positive scalar per element, so it
+equalises strong and weak aperture elements---conditioning the covariance
+estimates of Sec.~\ref{sec:coherent}---without rotating anything. The floor at
+\SI{5}{\percent} of the median magnitude prevents dead elements from dominating
+the quotient. The static is estimated from the recording itself, which keeps
+the procedure single-recording and deployment-honest at the cost of a disclosed
+limitation: a person who never moves is absorbed into $S$.
+
+Subtraction matters even though the analysis band begins at \SI{2}{\hertz}: the
+static term exceeds the dynamic term by orders of magnitude, and its leakage
+through window sidelobes would otherwise flood the low-Doppler bins.
+
+\subsection{Time--frequency analysis}
+\label{sec:tf}
+
+All spectra use \num{256}-sample windows with \num{128}-sample hop on the
+\SI{400}{\hertz} grid (\SI{0.64}{\second} windows, \SI{0.32}{\second} hop),
+retaining bins in $\pm 2$--\SI{150}{\hertz}. Sections~\ref{sec:sigprobe}--%
+\ref{sec:dopplergated} use a Hann window. From Sec.~\ref{sec:token} onward we
+use Thomson multitaper analysis~\cite{thomson1982multitaper} with $K = 4$
+discrete prolate spheroidal (Slepian) sequences~\cite{slepian1978dpss} at
+$NW = 2.5$. Slepian tapers maximise in-band energy concentration and are the
+standard remedy where the sidelobes of a dominant component would obscure a
+weaker superimposed one---the torso-versus-limb situation exactly. As a second
+benefit the $K$ tapers provide $K$ nearly independent spectral estimates per
+window, which serve directly as additional snapshots for the covariance
+estimates of Sec.~\ref{sec:token}.
+
+\subsection{Limb reference signals}
+\label{sec:gt}
+
+The dataset provides no inertial sensors; per-limb references derive from its
+multi-view 3D keypoints (BODY25~\cite{cao2021openpose}, reconstructed with
+EasyMocap~\cite{easymocap}). For five joints---left wrist, right wrist, left
+hip, right hip, head---keypoints with confidence above \num{0.3} are converted
+to 3D speeds, resampled to the CSI grid, smoothed with a \SI{0.5}{\second}
+moving average, and normalised to unit variance.
+
+Alignment follows the dataset's own convention, applied identically to all five
+rooms: keypoint frames and CSI are co-started and mapped proportionally, then
+interpolated onto the CSI time base. The released preprocessing likewise maps
+each keypoint frame to a proportional CSI segment, with no per-frame timestamps
+available to support anything finer; the \SI{0.5}{\second} smoothing is our
+tolerance for residual error.
+
+Where two limbs are scored against two estimated components, the five envelopes
+are first \emph{residualised}: each limb's envelope is regressed on the other
+four and the non-negative residual retained. Raw envelopes are strongly
+collinear through whole-body motion, which leaves a limbs-by-components
+assignment weakly identified.
+
+\section{Does Limb Identity Exist?}
+\label{sec:id}
+
+\subsection{Non-parametric spatial signature}
+\label{sec:sigprobe}
+
+The first probe asks whether, after normalisation removes the static room, the
+\emph{dynamic} pattern---which subcarriers and antennas respond when a given
+limb moves---distinguishes limbs and is stable across rooms.
+
+On island streams, we compute for each of the $87$ island channels the
+$\pm 2$--\SI{150}{\hertz} band power summed over windows, take logarithms, and
+remove the per-receiver mean, so that the feature is a \emph{pattern} rather
+than an intensity; the removed mean is retained as an intensity scalar for use
+as a control. Three receivers are concatenated, giving \num{261} dimensions per
+clip, and only clips complete in all three receivers are used.
+
+Action pairs are chosen \emph{motion-matched}, so that intensity cannot act as
+a shortcut. Four measurements are made: (A) cosine similarities between
+per-(action, room) mean signatures; (B) within-room classification, $70/30$
+split, ridge regression ($\lambda = 100$); (C) leave-one-room-out
+classification over all rotations; and (D) two controls on every fit---a
+label-shuffle null (\num{20} draws) and an intensity-only feature set, which
+must fail if the pattern carries the information.
+
+\subsection{Coherent super-resolution}
+\label{sec:coherent}
+
+The second probe asks whether identity lives in the angle and delay structure
+that the island representation discards, and therefore operates on the coherent
+representation with the cleaning and phase-safe normalisation of
+Secs.~\ref{sec:clean}--\ref{sec:norm}.
+
+Per recording, the \emph{positive} in-band STFT bins are collected as
+snapshots; the one-sided selection isolates the dynamic$\times$static$^*$ term
+from its conjugate mirror. Spatial smoothing over subcarriers with sub-aperture
+length $L = 20$~\cite{shan1985smoothing} yields $38$ sub-arrays per snapshot
+and a $40 \times 40$ covariance over the joint (2 baselines $\times$ 20
+subcarriers) aperture. MUSIC~\cite{schmidt1986music} is evaluated on a grid of
+antenna phase $\phi$ ($49$ points) by subcarrier phase $\psi$ ($97$ points),
+with steering vectors
+\begin{equation}
+\mathbf{a}(\phi,\psi) = \tfrac{1}{\sqrt{2L}}
+\big[1, e^{j\phi}\big]^{\!\top} \!\otimes\!
+\big[1, e^{j\psi}, \dots, e^{j(L-1)\psi}\big]^{\!\top}.
+\label{eq:steer}
+\end{equation}
+Two products are recorded: the log pseudo-spectrum (three receivers
+concatenated) as a signature, and the circular mean of its $\phi$ marginal as a
+scalar estimate of the mover's direction, whose circular spread across clips
+measures repeatability. The battery of Sec.~\ref{sec:sigprobe} is applied
+unchanged, plus a per-(room, action, receiver) direction table.
+
+Note that this arrangement pools all Doppler bins into a single covariance.
+
+\subsection{Doppler-gated joint estimation}
+\label{sec:dopplergated}
+
+That pooling is the resolution-limiting choice identified by the
+multi-dimensional tracking literature: two scatterers sharing an angular lobe
+but differing in Doppler are separable in the joint space and not in the
+marginal~\cite{xie2019mdtrack,qian2018widar2,li2016dynamicmusic}. The corrected
+probe therefore estimates \emph{per Doppler bin}: for each in-band bin the
+windows supply snapshots, subcarrier smoothing supplies sub-arrays, and MUSIC
+with a one-dimensional signal subspace returns that bin's (angle, delay) peak.
+
+Outputs are a Doppler--angle map per receiver, and the scalar
+\begin{equation}
+\Delta\phi = \angle\!\!\!\sum_{f \in \mathcal{F}_{\text{limb}}}\!\! w_f e^{j\phi_f}
+\;-\; \angle\!\!\!\sum_{f \in \mathcal{F}_{\text{torso}}}\!\! w_f e^{j\phi_f},
+\label{eq:dphi}
+\end{equation}
+with $\mathcal{F}_{\text{limb}} = 15$--\SI{80}{\hertz},
+$\mathcal{F}_{\text{torso}} = 2$--\SI{8}{\hertz} and $w_f$ the band energy:
+the fast-limb band's direction \emph{relative to the torso band's}. Being
+self-referenced, $\Delta\phi$ does not depend on how the array happens to be
+oriented in a given room, and is therefore the one candidate carrier of
+laterality that could transfer across rooms. The battery is as before, with the
+addition of a $\Delta\phi$-only classifier (sine and cosine of the three
+receivers' $\Delta\phi$) and a per-pair breakdown.
+
+\section{Identity-Free Separation}
+\label{sec:sep}
+
+\subsection{Tokenisation}
+\label{sec:token}
+
+The remaining method stops asking which limb a component belongs to. Each
+recording is reduced to a \emph{set of tokens}, one per retained
+time--frequency bin, carrying that bin's dominant scatterer's coordinates:
+\begin{equation}
+\text{token} = \big[\,w,\; f,\; \phi,\; \psi,\; \log E\,\big],
+\end{equation}
+for window index $w$, Doppler $f$, angle $\phi$, delay $\psi$, and energy $E$.
+The chain is: clean (Sec.~\ref{sec:clean}) $\rightarrow$ phase-safe normalise
+(Sec.~\ref{sec:norm}) $\rightarrow$ Slepian multitaper STFT
+(Sec.~\ref{sec:tf}) $\rightarrow$ per-bin MUSIC. Bins below the recording's
+median band energy are discarded. For a retained bin, the $K$ taper snapshots
+and the $38$ subcarrier sub-arrays form a $40 \times 40$ covariance, and MUSIC
+with a one-dimensional signal subspace gives the peak over a $37 \times 37$
+$(\phi, \psi)$ grid.
+
+\emph{Exact fast evaluation.} Rather than projecting each grid steering vector
+onto the $(2L-1)$-dimensional noise subspace $\mathbf{E}_n$, we use the
+completeness identity for a one-dimensional signal subspace: for unit-norm
+$\mathbf{a}$,
+\begin{equation}
+\|\mathbf{E}_n^{H}\mathbf{a}\|^2 = 1 - |\mathbf{v}_1^{H}\mathbf{a}|^2,
+\label{eq:completeness}
+\end{equation}
+where $\mathbf{v}_1$ is the principal eigenvector. The pseudo-spectrum
+$1/\|\mathbf{E}_n^{H}\mathbf{a}\|^2$ is therefore obtained from a single
+inner product per grid point. This is algebraically identical---the same
+peaks, not an approximation---and reduces the projection cost by the
+noise-subspace dimension. Measured on the full tokeniser, per-file cost falls
+from \SI{3.46}{\second} to \SI{0.15}{\second}, which is what makes tokenising
+the entire corpus a single short pass rather than a multi-day job.
+
+Tokens are cached one file per recording with a manifest carrying room,
+subject, action, take, receiver, and split.
+
+\subsection{Feasibility without learning}
+\label{sec:feas}
+
+Before training anything we test whether clustering these tokens groups them by
+limb at all, with a procedure that fits no parameter to any label---the
+WiFi analogue of DUET~\cite{yilmaz2004duet} with super-resolved bin
+coordinates.
+
+Per recording, $k$-means with $K = 2$ is run on the token set, weighted by
+$\sqrt{E}$, over features
+$(\cos\phi, \sin\phi, \cos\psi, \sin\psi, f/150)$ with eight restarts. Each
+cluster's energy is accumulated per window to give two envelopes. The reference
+is the residualised keypoint envelopes (Sec.~\ref{sec:gt}) of the two most
+active limbs; a recording enters the test only if those two envelopes are
+decorrelated ($|r| \le 0.7$), which is what makes a two-component question
+meaningful.
+
+Three quantities are recorded per recording:
+\begin{itemize}
+\item \textbf{matched}: the better of the two cluster-to-limb assignments,
+scored as the mean of the two correlations;
+\item \textbf{wrong permutation}: the same pair with the assignment swapped;
+\item \textbf{null}: the matched score recomputed against the reference
+circularly shifted by half its length, evaluated by the identical
+best-permutation rule so that the null inherits any optimism in the procedure.
+\end{itemize}
+The matched-minus-wrong-permutation \emph{gap} is the quantity that
+distinguishes two clusters that are \emph{different limbs} from two copies of
+whole-body motion: the latter correlates with both references and leaves no
+gap. Results are broken down per limb pair, since a head-versus-wrist pair is
+an easier case than wrist-versus-wrist.
+
+\emph{Ablations.} The same recordings are re-clustered with (i) Doppler alone,
+isolating the contribution of the spatial token axes, and (ii) tokens replaced
+by the bin's \emph{raw} aperture vector---the dominant complex
+$2\times 57$ vector obtained as the leading right singular vector of the
+$K \times 114$ taper matrix, phase-referenced to the recording's strongest
+element---in amplitude-and-phase, amplitude-only, and Doppler-only variants.
+Ablation (ii) removes the parametric step entirely, so that any spatial
+contribution is measured without the steering model as an intermediary.
+
+\subsection{Learned separator over token sets}
+\label{sec:model_arch}
+
+\emph{Architecture.} A recording is a set, so the model is a set
+transformer~\cite{lee2019settransformer,vaswani2017attention}. Each token is
+embedded from seven features---$\sin\phi$, $\cos\phi$, $\sin\psi$, $\cos\psi$,
+$f/150$, $w/(N_w - 1)$, and the per-recording $z$-scored $\log E$; circular
+quantities enter as sine/cosine pairs so their geometry is preserved---by a
+linear map to width $D$, followed by $L$ pre-norm encoder layers with four
+heads and feed-forward width $2D$, and a linear head to $M$ slots with a
+softmax over slots. The softmax makes the slots a partition of the recording's
+token energy. Padding is masked.
+
+Slot energy envelopes are formed differentiably by scattering
+assignment-weighted token energies into their windows,
+\begin{equation}
+\mathcal{E}_m[w] \;=\; \sum_{i \,:\, w_i = w} a_{i,m}\, E_i ,
+\label{eq:env}
+\end{equation}
+which is the quantity both losses and the gate consume.
+
+\subsection{Objectives}
+\label{sec:losses}
+
+Both objectives are permutation- and identity-free. This is a deliberate
+inversion of a design that failed in the earlier phase of this project, in
+which slot $m$ was pinned to limb $m$ globally and the model learned
+motion-intensity shortcuts instead of separation.
+
+\emph{Envelope permutation-invariant loss} (weak supervision). Against the two
+most active residualised keypoint envelopes $G_i, G_j$,
+\begin{equation}
+\mathcal{L}_{\text{PIT}} = 1 - \max_{m_1 \neq m_2}
+\tfrac{1}{2}\big[\rho(\mathcal{E}_{m_1}, G_i) + \rho(\mathcal{E}_{m_2}, G_j)\big],
+\label{eq:pit}
+\end{equation}
+with $\rho$ the Pearson correlation. The permutation is resolved per
+recording~\cite{yu2017pit}; no slot ever acquires a name.
+
+\emph{Mixture-invariant origin loss} (no supervision). Two recordings from the
+same receiver have their token sets unioned, with the energy feature re-scored
+over the union. With $o_i \in \{0,1\}$ the origin indicator, normalised weights
+$\bar E_i$, and $\mathcal{P}$ the set of non-trivial bipartitions of the $M$
+slots,
+\begin{equation}
+\mathcal{L}_{\text{MixIT}} = \min_{P \in \mathcal{P}}
+\sum_i \bar E_i \Big( \textstyle\sum_{m \in P} a_{i,m} - o_i \Big)^{2}.
+\label{eq:mixit}
+\end{equation}
+The model must be able to split its slots into two groups that reconstruct each
+recording's share of the energy~\cite{wisdom2020mixit,tzinis2022remixit}. This
+objective is necessary rather than convenient: isolated single-limb recordings
+do not exist, so supervised separation targets are unavailable in principle.
+
+\emph{Optimisation.} Adam with cosine decay and gradient-norm clipping at
+\num{5}. Each step draws a batch of recordings for \eqref{eq:pit} and a batch
+of pairs for \eqref{eq:mixit}, the latter evaluated in a single padded forward
+pass. The GPU is claimed before bulk file reads, with a retry loop, on account
+of a unified-memory failure mode observed on the training machine. Training is
+resume-safe and checkpoints carry their configuration. Two configurations are
+reported, a small and a scaled one; during training a held-out-room evaluation
+is run periodically and the best checkpoint retained.
+
+\subsection{Gate protocol}
+\label{sec:gate}
+
+The gate applies the battery of Sec.~\ref{sec:feas} to the learned model on
+every test-room recording that has a reference and satisfies the
+two-decorrelated-limbs criterion, and scores the zero-learning Doppler
+$k$-means clustering on the \emph{same} recordings as a paired control.
+Reported quantities are matched, wrong-permutation, gap, null, and win rate
+against the null for both arms; the fraction of recordings on which the model
+beats the control; and the per-limb-pair breakdown. A learned number is
+credited only if it beats the trivial procedure on the same data.
+
+\section{Transfer Probe: Pose Estimation on Frozen Outputs}
+\label{sec:transfer}
+
+The final protocol asks whether the separator's output is a \emph{universal}
+representation: does a downstream task trained on its outputs in one set of
+rooms transfer to a room never seen?
+
+The separator is frozen. Per window its outputs are summarised as, for each
+slot, the total assigned energy plus the energy in three Doppler bands
+(2--10, 10--40, 40--\SI{150}{\hertz}); receivers are concatenated. A control arm
+replaces this with band energies computed \emph{without} the separator (eight
+bands plus the total, per receiver). Both are log-transformed and $z$-scored per
+recording, so the arms differ only in whether the separator mediates the
+features.
+
+The task is the one the dataset's own work addresses~\cite{perceptalign2026}:
+3D pose. Targets are BODY25 joints 0--14 expressed \emph{root-relative} to the
+mid-hip joint---absolute coordinates differ per room by construction, so pose
+\emph{shape} is the transferable quantity---interpolated to window centres,
+with per-joint gaps linearly filled where at least half the frames are valid.
+
+The head is deliberately small: a two-layer GRU and a linear output, trained
+with masked $L_1$ (root joint excluded), identical architecture and budget in
+both arms. The metric is mean per-joint position error (MPJPE) in centimetres,
+median over clips. A third reference is the \emph{mean-pose baseline}---the
+training-set average skeleton---which is the floor any claim of transfer must
+clear. Two configurations are run: training on one room, and on the three
+training rooms pooled; both tested on an unseen room, with an in-domain
+held-out set reported alongside.
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+\emph{Dataset.} Five rooms, \num{21} subjects, \num{17} actions, three
+receivers per capture, each with three antennas and \num{57} subcarriers;
+nominal packet rate \SI{810}{\hertz}, always re-derived per recording. Each
+capture carries synchronised multi-view 3D keypoints.
+
+\emph{Splits.} Rooms 1--3 train, rooms 4--5 test, enforced inside every script
+rather than by convention. No model, classifier, or clustering rule observes
+the test rooms during fitting.
+
+\emph{Implementation.} Tokenisation and reference extraction run as parallel
+CPU passes; the separator and probes train on a single GPU. All stages are
+configured by environment variables and are resume-safe.
+Table~\ref{tab:scripts} maps each method section to the script that implements
+it.
+
+\begin{table}[t]
+\caption{Method sections and their implementations.}
+\label{tab:scripts}
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Stage & Script \\
+\midrule
+Spatial signature (Sec.~\ref{sec:sigprobe}) & \texttt{23\_limb\_signature.py} \\
+Coherent MUSIC (Sec.~\ref{sec:coherent}) & \texttt{25\_superres\_signature.py} \\
+Doppler-gated (Sec.~\ref{sec:dopplergated}) & \texttt{26\_dopplergated\_music.py} \\
+Feasibility clustering (Sec.~\ref{sec:feas}) & \texttt{27\_limb\_clustering.py} \\
+Raw-aperture ablation (Sec.~\ref{sec:feas}) & \texttt{28\_limb\_clustering\_raw.py} \\
+Tokenisation (Sec.~\ref{sec:token}) & \texttt{prep/tokenize\_pa.py} \\
+Limb references (Sec.~\ref{sec:gt}) & \texttt{prep/limbgt\_tokens.py} \\
+Separator (Sec.~\ref{sec:model_arch}) & \texttt{train/train\_limbtok.py} \\
+Gate (Sec.~\ref{sec:gate}) & \texttt{eval/eval\_limbtok.py} \\
+Pose targets (Sec.~\ref{sec:transfer}) & \texttt{prep/posegt\_tokens.py} \\
+Transfer probe (Sec.~\ref{sec:transfer}) & \texttt{train/train\_pose\_probe.py} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}
+\label{sec:results}
+
+\resultslot{Section deliberately left empty. To be written: identification
+probes (Sec.~\ref{sec:id}); zero-learning feasibility and ablations
+(Sec.~\ref{sec:feas}); learned-separator gate against the paired control
+(Sec.~\ref{sec:gate}); transfer probe (Sec.~\ref{sec:transfer}).}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\resultslot{To be written once Sec.~\ref{sec:results} is fixed.}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\resultslot{To be written once Sec.~\ref{sec:results} is fixed.}
+
+%% To use the .bib file instead of the embedded list below:
+%% \bibliographystyle{IEEEtran}
+%% \bibliography{refs}
+
+\begin{thebibliography}{00}
+
+\bibitem{wang2015carm} W. Wang, A. X. Liu, M. Shahzad, K. Ling, and S. Lu,
+``Understanding and modeling of WiFi signal based human activity
+recognition,'' in \emph{Proc. ACM MobiCom}, 2015, pp. 65--76.
+
+\bibitem{adib2013seethrough} F. Adib and D. Katabi, ``See through walls with
+WiFi!'' in \emph{Proc. ACM SIGCOMM}, 2013, pp. 75--86.
+
+\bibitem{zheng2019widar3} Y. Zheng, Y. Zhang, K. Qian, G. Zhang, Y. Liu,
+C. Wu, and Z. Yang, ``Zero-effort cross-domain gesture recognition with
+Wi-Fi,'' in \emph{Proc. ACM MobiSys}, 2019, pp. 313--325.
+
+\bibitem{wang2019personinwifi} F. Wang, S. Zhou, S. Panev, J. Han, and
+D. Huang, ``Person-in-WiFi: Fine-grained person perception using WiFi,'' in
+\emph{Proc. IEEE/CVF ICCV}, 2019, pp. 5452--5461.
+
+\bibitem{geng2022densepose} J. Geng, D. Huang, and F. De la Torre,
+``DensePose from WiFi,'' \emph{arXiv:2301.00250}, 2022.
+
+\bibitem{yan2024personinwifi3d} Y. Yan, F. Wang, H. Qin \emph{et al.},
+``Person-in-WiFi 3D: End-to-end multi-person 3D pose estimation with Wi-Fi,''
+in \emph{Proc. IEEE/CVF CVPR}, 2024.
+
+\bibitem{perceptalign2026} PerceptAlign authors, ``Breaking coordinate
+overfitting: Geometry-aware WiFi sensing for cross-layout 3D pose
+estimation,'' \emph{arXiv:2601.12252}, 2026. [Online]. Available:
+\url{https://github.com/Trymore-lab/PerceptAlign}
+
+\bibitem{hershey2016deep} J. R. Hershey, Z. Chen, J. Le Roux, and
+S. Watanabe, ``Deep clustering: Discriminative embeddings for segmentation and
+separation,'' in \emph{Proc. IEEE ICASSP}, 2016, pp. 31--35.
+
+\bibitem{zeghidour2021wavesplit} N. Zeghidour and D. Grangier, ``Wavesplit:
+End-to-end speech separation by speaker clustering,'' \emph{IEEE/ACM Trans.
+Audio, Speech, Language Process.}, vol. 29, pp. 2840--2849, 2021.
+
+\bibitem{qian2017widar} K. Qian, C. Wu, Z. Yang, Y. Liu, and K. Jamieson,
+``Widar: Decimeter-level passive tracking via velocity monitoring with
+commodity Wi-Fi,'' in \emph{Proc. ACM MobiHoc}, 2017.
+
+\bibitem{qian2018widar2} K. Qian, C. Wu, Y. Zhang, G. Zhang, Z. Yang, and
+Y. Liu, ``Widar2.0: Passive human tracking with a single Wi-Fi link,'' in
+\emph{Proc. ACM MobiSys}, 2018, pp. 350--361.
+
+\bibitem{kotaru2015spotfi} M. Kotaru, K. Joshi, D. Bharadia, and S. Katti,
+``SpotFi: Decimeter level localization using WiFi,'' in \emph{Proc. ACM
+SIGCOMM}, 2015, pp. 269--282.
+
+\bibitem{schmidt1986music} R. O. Schmidt, ``Multiple emitter location and
+signal parameter estimation,'' \emph{IEEE Trans. Antennas Propag.}, vol. 34,
+no. 3, pp. 276--280, 1986.
+
+\bibitem{shan1985smoothing} T.-J. Shan, M. Wax, and T. Kailath, ``On spatial
+smoothing for direction-of-arrival estimation of coherent signals,''
+\emph{IEEE Trans. Acoust., Speech, Signal Process.}, vol. 33, no. 4,
+pp. 806--811, 1985.
+
+\bibitem{li2016dynamicmusic} X. Li, S. Li, D. Zhang, J. Xiong, Y. Wang, and
+H. Mei, ``Dynamic-MUSIC: Accurate device-free indoor localization,'' in
+\emph{Proc. ACM UbiComp}, 2016, pp. 196--207.
+
+\bibitem{li2017indotrack} X. Li, D. Zhang, Q. Lv, J. Xiong, S. Li, Y. Zhang,
+and H. Mei, ``IndoTrack: Device-free indoor human tracking with commodity
+Wi-Fi,'' \emph{Proc. ACM IMWUT}, vol. 1, no. 3, pp. 1--22, 2017.
+
+\bibitem{xie2019mdtrack} Y. Xie, J. Xiong, M. Li, and K. Jamieson,
+``mD-Track: Leveraging multi-dimensionality for passive indoor Wi-Fi
+tracking,'' in \emph{Proc. ACM MobiCom}, 2019, pp. 1--16.
+
+\bibitem{zeng2019farsense} Y. Zeng, D. Wu, J. Xiong, E. Yi, R. Gao, and
+D. Zhang, ``FarSense: Pushing the range limit of WiFi-based respiration
+sensing with CSI ratio of two antennas,'' \emph{Proc. ACM IMWUT}, vol. 3,
+no. 3, pp. 1--26, 2019.
+
+\bibitem{halperin2011tool} D. Halperin, W. Hu, A. Sheth, and D. Wetherall,
+``Tool release: Gathering 802.11n traces with channel state information,''
+\emph{ACM SIGCOMM Comput. Commun. Rev.}, vol. 41, no. 1, p. 53, 2011.
+
+\bibitem{yilmaz2004duet} \"O. Y{\i}lmaz and S. Rickard, ``Blind separation of
+speech mixtures via time--frequency masking,'' \emph{IEEE Trans. Signal
+Process.}, vol. 52, no. 7, pp. 1830--1847, 2004.
+
+\bibitem{yu2017pit} D. Yu, M. Kolb\ae{}k, Z.-H. Tan, and J. Jensen,
+``Permutation invariant training of deep models for speaker-independent
+multi-talker speech separation,'' in \emph{Proc. IEEE ICASSP}, 2017,
+pp. 241--245.
+
+\bibitem{luo2019convtasnet} Y. Luo and N. Mesgarani, ``Conv-TasNet:
+Surpassing ideal time--frequency magnitude masking for speech separation,''
+\emph{IEEE/ACM Trans. Audio, Speech, Language Process.}, vol. 27, no. 8,
+pp. 1256--1266, 2019.
+
+\bibitem{wang2023tfgridnet} Z.-Q. Wang, S. Cornell, S. Choi, Y. Lee,
+B.-Y. Kim, and S. Watanabe, ``TF-GridNet: Integrating full- and sub-band
+modeling for speech separation,'' \emph{IEEE/ACM Trans. Audio, Speech,
+Language Process.}, vol. 31, pp. 3221--3236, 2023.
+
+\bibitem{wisdom2020mixit} S. Wisdom, E. Tzinis, H. Erdogan, R. J. Weiss,
+K. Wilson, and J. R. Hershey, ``Unsupervised sound separation using mixture
+invariant training,'' in \emph{Proc. NeurIPS}, 2020.
+
+\bibitem{tzinis2022remixit} E. Tzinis, J. Casebeer, Z. Wang, and
+P. Smaragdis, ``RemixIT: Continual self-training of speech enhancement models
+via bootstrapped remixing,'' \emph{IEEE J. Sel. Topics Signal Process.},
+vol. 16, no. 6, pp. 1329--1341, 2022.
+
+\bibitem{thomson1982multitaper} D. J. Thomson, ``Spectrum estimation and
+harmonic analysis,'' \emph{Proc. IEEE}, vol. 70, no. 9, pp. 1055--1096, 1982.
+
+\bibitem{slepian1978dpss} D. Slepian, ``Prolate spheroidal wave functions,
+Fourier analysis, and uncertainty --- V: The discrete case,'' \emph{Bell Syst.
+Tech. J.}, vol. 57, no. 5, pp. 1371--1430, 1978.
+
+\bibitem{chen2018cepstral} S. Furui, ``Cepstral analysis technique for
+automatic speaker verification,'' \emph{IEEE Trans. Acoust., Speech, Signal
+Process.}, vol. 29, no. 2, pp. 254--272, 1981.
+
+\bibitem{cao2021openpose} Z. Cao, G. Hidalgo, T. Simon, S.-E. Wei, and
+Y. Sheikh, ``OpenPose: Realtime multi-person 2D pose estimation using part
+affinity fields,'' \emph{IEEE Trans. Pattern Anal. Mach. Intell.}, vol. 43,
+no. 1, pp. 172--186, 2021.
+
+\bibitem{easymocap} EasyMoCap Contributors, ``EasyMoCap --- Make human motion
+capture easier,'' GitHub, 2021. [Online]. Available:
+\url{https://github.com/zju3dv/EasyMocap}
+
+\bibitem{vaswani2017attention} A. Vaswani, N. Shazeer, N. Parmar,
+J. Uszkoreit, L. Jones, A. N. Gomez, {\L}. Kaiser, and I. Polosukhin,
+``Attention is all you need,'' in \emph{Proc. NeurIPS}, 2017.
+
+\bibitem{lee2019settransformer} J. Lee, Y. Lee, J. Kim, A. R. Kosiorek,
+S. Choi, and Y. W. Teh, ``Set transformer: A framework for attention-based
+permutation-invariant neural networks,'' in \emph{Proc. ICML}, 2019,
+pp. 3744--3753.
+
+\end{thebibliography}
+
+\end{document}
