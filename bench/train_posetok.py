@@ -248,6 +248,11 @@ def main():
         return (rs[:, 0].mean(), rs[:, 1].mean() * 100, rs[:, 2].mean() * 100,
                 np.median(ratio), np.median(tc))
     best = 1e9
+    WARM = os.path.expanduser(os.environ.get("WARM", ""))
+    if WARM and os.path.exists(WARM) and not os.path.exists(f"{OUTD}/last.pt"):
+        wck = torch.load(WARM, map_location=dev, weights_only=False)
+        net.load_state_dict(wck["model"])
+        print(f"warm-start from {WARM} (step {wck.get('step')})", flush=True)
     if os.path.exists(f"{OUTD}/last.pt"):
         ckr = torch.load(f"{OUTD}/last.pt", map_location=dev,
                          weights_only=False)
