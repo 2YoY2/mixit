@@ -24,6 +24,8 @@ TMAX = int(os.environ.get("TMAX", "1600"))
 STATIC = int(os.environ.get("STATIC", "0"))
 SLOTQ = int(os.environ.get("SLOTQ", "1"))
 HDIM = int(os.environ.get("HDIM", "128"))
+LAGFIX = int(os.environ.get("LAGFIX", "1"))
+SHIFTS = int(os.environ.get("SHIFTS", "2"))
 ENCL = int(os.environ.get("ENCL", "3"))
 HEADS = int(os.environ.get("HEADS", "4"))
 POSESLOTS = [int(v) for v in os.environ.get("POSESLOTS", "1,2").split(",")]
@@ -92,7 +94,7 @@ def rec_tok(rid, rx):
 
 def build(scenes):
     slottag = "".join(map(str, POSESLOTS))
-    cf = f"{TOK}/tokpose3s{slottag}_{'-'.join(map(str, scenes))}.pkl"
+    cf = f"{TOK}/tokpose4s{slottag}_{'-'.join(map(str, scenes))}.pkl"
     if os.path.exists(cf):
         return pickle.load(open(cf, "rb"))
     man = pd.read_csv(f"{TOK}/manifest.csv")
@@ -112,9 +114,28 @@ def build(scenes):
             keep = np.argsort(-tok[:, 6].astype(np.float32))[:TMAX]
             tok = tok[keep]
         S12 = np.concatenate([t[1][:nw] for t in ts], 1)
-        P = np.asarray(np.load(pf), np.float32)[:nw]
+        P = np.asarray(np.load(pf), np.float32)
         if not np.isfinite(P).any(): continue
-        out.append((tok, P, nw, rids, S12))
+        if LAGFIX and len(P) >= nw:
+            eng = (10.0 ** S12[:, 0::6].astype(np.float64)).sum(1)
+            spd = np.linalg.norm(np.diff(np.nan_to_num(P), axis=0), axis=-1
+                                 ).sum(-1)
+            spd = np.r_[spd[:1], spd]
+            best_l, best_c = 0, -2
+            for lag in range(-3, 4):
+                a = eng[max(0, -lag):nw - max(0, lag)]
+                b = spd[max(0, lag):len(spd) - max(0, -lag)][:len(a)]
+                if len(a) > 8 and a.std() > 1e-9 and b.std() > 1e-9:
+                    c = np.corrcoef(a[:len(b)], b)[0, 1]
+                    if c > best_c: best_c, best_l = c, lag
+            P = P[max(0, best_l):][:nw] if best_l >= 0 else \
+                np.r_[np.full((-best_l, *P.shape[1:]), np.nan,
+                              np.float32), P[:nw + best_l]]
+        P = P[:nw]
+        if len(P) < nw:
+            P = np.r_[P, np.full((nw - len(P), *P.shape[1:]), np.nan,
+                                 np.float32)]
+        out.append((tok, P.astype(np.float32), nw, rids, S12))
         if len(out) % 1000 == 0: print(f"  s{scenes}: {len(out)}", flush=True)
     pickle.dump(out, open(cf, "wb"), protocol=4)
     return out
@@ -297,9 +318,23 @@ def main():
         Z = (Y - MUt) / SDt
         msk = torch.isfinite(Y).all(-1, keepdim=True)
         msk[:, :, ROOTJ] = False
-        loss = (torch.where(msk, (pred - torch.nan_to_num(Z)).abs(),
-                            torch.zeros_like(pred)).sum()
-                / msk.sum().clamp(min=1) / 3)
+        cands = []
+        for sh in range(-SHIFTS, SHIFTS + 1):
+            if sh == 0:
+                Zs, Ms = Z, msk
+            elif sh > 0:
+                Zs = torch.cat([Z[:, sh:], torch.full_like(Z[:, :sh], np.nan)], 1)
+                Ms = torch.cat([msk[:, sh:], torch.zeros_like(msk[:, :sh])], 1)
+            else:
+                Zs = torch.cat([torch.full_like(Z[:, :(-sh)], np.nan),
+                                Z[:, :sh]], 1)
+                Ms = torch.cat([torch.zeros_like(msk[:, :(-sh)]),
+                                msk[:, :sh]], 1)
+            l_ = (torch.where(Ms, (pred - torch.nan_to_num(Zs)).abs(),
+                              torch.zeros_like(pred)).sum(dim=(1, 2, 3))
+                  / Ms.sum(dim=(1, 2, 3)).clamp(min=1) / 3)
+            cands.append(l_)
+        loss = torch.stack(cands, 1).min(1).values.mean()
         dz = pred[:, 1:] - pred[:, :-1]
         dg = torch.nan_to_num(Z[:, 1:] - Z[:, :-1])
         mv = msk[:, 1:] & msk[:, :-1]
