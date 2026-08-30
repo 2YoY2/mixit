@@ -24,7 +24,9 @@ TMAX = int(os.environ.get("TMAX", "1600"))
 STATIC = int(os.environ.get("STATIC", "0"))
 SLOTQ = int(os.environ.get("SLOTQ", "1"))
 HDIM = int(os.environ.get("HDIM", "128"))
-LAGFIX = int(os.environ.get("LAGFIX", "1"))
+LAGFIX = int(os.environ.get("LAGFIX", "0"))
+STATTOK = int(os.environ.get("STATTOK", "0"))
+NSP = 8
 SHIFTS = int(os.environ.get("SHIFTS", "2"))
 ENCL = int(os.environ.get("ENCL", "3"))
 HEADS = int(os.environ.get("HEADS", "4"))
@@ -94,7 +96,7 @@ def rec_tok(rid, rx):
 
 def build(scenes):
     slottag = "".join(map(str, POSESLOTS))
-    cf = f"{TOK}/tokpose4s{slottag}_{'-'.join(map(str, scenes))}.pkl"
+    cf = f"{TOK}/tokpose5s{slottag}_{'-'.join(map(str, scenes))}.pkl"
     if os.path.exists(cf):
         return pickle.load(open(cf, "rb"))
     man = pd.read_csv(f"{TOK}/manifest.csv")
@@ -135,10 +137,50 @@ def build(scenes):
         if len(P) < nw:
             P = np.r_[P, np.full((nw - len(P), *P.shape[1:]), np.nan,
                                  np.float32)]
-        out.append((tok, P.astype(np.float32), nw, rids, S12))
+        out.append((tok, P.astype(np.float32), nw, rids, S12,
+                    static_path_tokens(rids).astype(np.float16)))
         if len(out) % 1000 == 0: print(f"  s{scenes}: {len(out)}", flush=True)
     pickle.dump(out, open(cf, "wb"), protocol=4)
     return out
+
+_L, _NPH, _NPS = 20, 37, 37
+_PH = np.linspace(-np.pi, np.pi, _NPH, endpoint=False)
+_PS = np.linspace(-np.pi, np.pi, _NPS, endpoint=False)
+_AA = np.stack([np.ones(_NPH), np.exp(1j * _PH)], 1)
+_AS = np.exp(1j * np.outer(_PS, np.arange(_L)))
+_ST = (_AA[:, None, :, None] * _AS[None, :, None, :]).reshape(
+    _NPH * _NPS, 2 * _L)
+_ST = (_ST / np.sqrt(2 * _L)).astype(np.complex64)
+_IPH, _IPS = np.unravel_index(np.arange(_NPH * _NPS), (_NPH, _NPS))
+
+def static_path_tokens(rids):
+    """(3*NSP, 18) tokens: top-NSP Bartlett peaks of each rx static."""
+    out = []
+    for ri, r in enumerate(rids):
+        f = f"{TOK}/statics/{r:06d}.npy"
+        toks = np.zeros((NSP, 18), np.float32)
+        if os.path.exists(f):
+            v = np.load(f)
+            y = (v[171:285] + 1j * v[285:]).reshape(2, 57).astype(np.complex64)
+            sb = np.stack([y[:, k:k + _L].reshape(-1)
+                           for k in range(57 - _L + 1)], 0)
+            P = (np.abs(sb @ _ST.conj().T) ** 2).mean(0)
+            order = np.argsort(-P)
+            picks = []
+            for j in order:
+                if all(abs(int(_IPH[j]) - int(_IPH[k])) > 2 or
+                       abs(int(_IPS[j]) - int(_IPS[k])) > 2 for k in picks):
+                    picks.append(j)
+                if len(picks) >= NSP: break
+            lp = np.log10(P[picks] + 1e-12)
+            zlp = (lp - lp.mean()) / (lp.std() + 1e-6)
+            for n, j in enumerate(picks):
+                phi, psi = _PH[_IPH[j]], _PS[_IPS[j]]
+                toks[n, :7] = [np.sin(phi), np.cos(phi), np.sin(psi),
+                               np.cos(psi), -0.05, 0.5, zlp[n]]
+                toks[n, 15 + ri] = 1.0
+        out.append(toks)
+    return np.concatenate(out, 0)                        # (3*NSP, 18)
 
 SCACHE, RIDMETA, TEMPLATES = {}, {}, {}
 def _raw_static(r):
@@ -188,8 +230,14 @@ class PoseTok(nn.Module):
         self.ff = nn.Sequential(nn.Linear(H, 2 * H), nn.GELU(),
                                 nn.Linear(2 * H, H))
         self.out = nn.Linear(H, NJ * 3)
-    def forward(self, x, mask, nws, st=None, qs=None):
+    def forward(self, x, mask, nws, st=None, qs=None, sp=None):
         h = self.inp(x) + self.type_emb[0]
+        if sp is not None:
+            hp = self.inp(sp) + self.type_emb[1]
+            h = torch.cat([h, hp], 1)
+            mask = torch.cat([mask, torch.zeros(
+                x.shape[0], sp.shape[1], dtype=torch.bool,
+                device=mask.device)], 1)
         if st is not None:
             sh = self.sinp(st) + self.type_emb[1]        # (B, 3, H)
             h = torch.cat([h, sh], 1)
@@ -230,11 +278,11 @@ def main():
     mu = np.zeros((NJ, 3)); sd = np.ones((NJ, 3))
     for j in range(NJ):
         vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
-                             for _, P, _, _, _ in tr if np.isfinite(P[:, j]).any()])
+                             for it in tr for P in [it[1]] if np.isfinite(P[:, j]).any()])
         if len(vs): mu[j] = vs.mean(0); sd[j] = vs.std(0) + 1e-3
     MUt = torch.from_numpy(mu.astype(np.float32)).to(dev)
     SDt = torch.from_numpy(sd.astype(np.float32)).to(dev)
-    bt = [mpjpe_pck(np.broadcast_to(mu, P.shape), P) for _, P, _, _, _ in te]
+    bt = [mpjpe_pck(np.broadcast_to(mu, it[1].shape), it[1]) for it in te for P in [it[1]]]
     bt = np.array([r for r in bt if r])
     print(f"mean-pose baseline scene4: MPJPE {bt[:,0].mean():.0f} mm  "
           f"PCK@20 {bt[:,1].mean()*100:.1f}  PCK@50 {bt[:,2].mean()*100:.1f}",
@@ -248,14 +296,16 @@ def main():
         rs, ratio, tc = [], [], []
         mu_np, sd_np = MUt.cpu().numpy(), SDt.cpu().numpy()
         with torch.no_grad():
-            for tok, P, nw, rids, S12 in ds[:cap]:
+            for tok, P, nw, rids, S12, SPt in ds[:cap]:
                 X = torch.from_numpy(tok.astype(np.float32))[None].to(dev)
                 mask = torch.zeros(1, len(tok), dtype=torch.bool, device=dev)
                 st = torch.from_numpy(get_static(rids))[None].to(dev) \
                     if STATIC else None
                 qs = torch.from_numpy(S12.astype(np.float32))[None].to(dev) \
                     if SLOTQ else None
-                pr = net(X, mask, [nw], st, qs)[0, :len(P)].cpu().numpy()
+                spt = torch.from_numpy(SPt.astype(np.float32))[None].to(dev) \
+                    if STATTOK else None
+                pr = net(X, mask, [nw], st, qs, spt)[0, :len(P)].cpu().numpy()
                 pr = pr * sd_np + mu_np                   # de-normalize
                 r = mpjpe_pck(pr, P)
                 if r: rs.append(r)
@@ -297,7 +347,9 @@ def main():
         Y = torch.full((B, max(nws), NJ, 3), np.nan)
         S = torch.zeros(B, 3, 399)
         QS = torch.zeros(B, max(nws), len(POSESLOTS) * 6 * 3)
+        SP = torch.zeros(B, 3 * NSP, 18)
         for k, it in enumerate(items):
+            SP[k] = torch.from_numpy(it[5].astype(np.float32))
             X[k, :len(it[0])] = torch.from_numpy(it[0].astype(np.float32))
             mask[k, :len(it[0])] = False
             Y[k, :len(it[1])] = torch.from_numpy(it[1])
@@ -312,9 +364,10 @@ def main():
                 else:
                     S[k] = torch.from_numpy(get_static(it[3]))
         X, mask, Y, S = X.to(dev), mask.to(dev), Y.to(dev), S.to(dev)
-        QS = QS.to(dev)
+        QS, SP = QS.to(dev), SP.to(dev)
         pred = net(X, mask, nws, S if STATIC else None,
-                   QS if SLOTQ else None)                 # in Z-space
+                   QS if SLOTQ else None,
+                   SP if STATTOK else None)               # in Z-space
         Z = (Y - MUt) / SDt
         msk = torch.isfinite(Y).all(-1, keepdim=True)
         msk[:, :, ROOTJ] = False
