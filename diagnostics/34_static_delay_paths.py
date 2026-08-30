@@ -21,6 +21,7 @@ LA = int(os.environ.get("LA", "44"))
 MORD = int(os.environ.get("MORD", "4"))
 NGRID = 512
 SIG = float(os.environ.get("SIG", "0.03"))
+EXCL = float(os.environ.get("EXCL", "0.0"))   # mask |psi|<EXCL (self-term)
 PSI = np.linspace(-np.pi, np.pi, NGRID, endpoint=False)
 AG = np.exp(1j * np.outer(PSI, np.arange(LA))) / np.sqrt(LA)   # (NGRID, LA)
 
@@ -49,6 +50,8 @@ def soft_spec(psis, amps):
     d = np.abs(PSI[:, None] - psis[None, :])
     d = np.minimum(d, 2 * np.pi - d)
     s = (np.exp(-0.5 * (d / SIG) ** 2) * (np.abs(amps) ** 2)[None, :]).sum(1)
+    if EXCL > 0:
+        s[np.abs(PSI) < EXCL] = 0.0
     return s / (np.linalg.norm(s) + 1e-12)
 
 def rec_repr(rid):
@@ -70,6 +73,7 @@ def match_amp_corr(ra, rb):
     for p in range(2):
         pa_, aa, _ = ra[p]; pb_, ab, _ = rb[p]
         for i, ps in enumerate(pa_):
+            if EXCL > 0 and abs(ps) < EXCL: continue
             d = np.abs(pb_ - ps)
             d = np.minimum(d, 2 * np.pi - d)
             j = int(np.argmin(d))
