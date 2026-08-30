@@ -23,6 +23,8 @@ spec.loader.exec_module(ptk)
 POSECKPT = os.path.expanduser(os.environ.get(
     "POSECKPT", "~/zerdani/buffer/octonet/posetok_v7runs/best.pt"))
 STEPS = int(os.environ.get("STEPS", "6000"))
+TRSC = [int(v) for v in os.environ.get("TRSC", "1,2,3").split(",")]
+TESC = [int(v) for v in os.environ.get("TESC", "4").split(",")]
 B = int(os.environ.get("B", "64"))
 NC = 17
 NAMES = ["L-arm-str", "R-arm-str", "both-str", "L-lat-rai", "R-lat-rai",
@@ -52,7 +54,9 @@ def pose_sets(scenes):
                 if ptk.SLOTQ else None
             spt = torch.from_numpy(SPt.astype(np.float32))[None].to(dev) \
                 if ptk.STATTOK else None
-            pr = net(X, mask, [nw], None, qs, spt)[0, :len(P)].cpu().numpy()
+            st = torch.from_numpy(ptk.get_static(rids))[None].to(dev) \
+                if ptk.STATIC else None
+            pr = net(X, mask, [nw], st, qs, spt)[0, :len(P)].cpu().numpy()
             act = RID2ACT.get(int(rids[0]))
             if act is None: continue
             gt = np.nan_to_num(P.reshape(len(P), -1))
@@ -102,17 +106,17 @@ def run_arm(tag, ai, tr, te):
     acc = (P == Y).mean()
     Pm = np.array([MIRROR.get(v + 1, v + 1) for v in P])
     Ym = np.array([MIRROR.get(v + 1, v + 1) for v in Y])
-    print(f"\n[{tag}] scene4: 17-class {acc:.3f}  "
+    print(f"\n[{tag}] test: 17-class {acc:.3f}  "
           f"mirror-merged {np.mean(Pm == Ym):.3f}  (chance 0.059)", flush=True)
     return P, Y
 
-print("building pose sets (train 1-3, test 4)", flush=True)
-tr = pose_sets([1, 2, 3])
-te = pose_sets([4])
+print(f"building pose sets (train {TRSC}, test {TESC})", flush=True)
+tr = pose_sets(TRSC)
+te = pose_sets(TESC)
 print(f"train {len(tr)} test {len(te)}", flush=True)
 Pp, Yp = run_arm("PRED-pose", 0, tr, te)
 Pg, Yg = run_arm("GT-pose ceiling", 1, tr, te)
-print("\nconfusion (PRED-pose arm, rows=true, % of row, top-3 shown):")
+print("\nconfusion (PRED-pose arm, test scenes, rows=true, % of row, top-3 shown):")
 for k in range(NC):
     m = Yp == k
     if not m.any(): continue
