@@ -45,7 +45,8 @@ def components(y):
             for j in picks]
 
 def match(c, cs, tolp=TOLP, tols=TOLS):
-    for (p2, s2, _) in cs:
+    for tup in cs:
+        p2, s2 = tup[0], tup[1]
         dp = abs(c[0] - p2); dp = min(dp, 2 * np.pi - dp)
         ds = abs(c[1] - s2); ds = min(ds, 2 * np.pi - ds)
         if dp < tolp and ds < tols: return True
