@@ -23,6 +23,10 @@ LR = float(os.environ.get("LR", "5e-4"))
 TMAX = int(os.environ.get("TMAX", "1600"))
 STATIC = int(os.environ.get("STATIC", "1"))
 VELW = float(os.environ.get("VELW", "0.5"))
+SDROP = float(os.environ.get("SDROP", "0.3"))
+SWAP = float(os.environ.get("SWAP", "0.2"))
+TEMPL = int(os.environ.get("TEMPL", "1"))
+OUTDIR = os.path.expanduser(os.environ.get("OUT", "~/zerdani/buffer/octonet/posetok_runs"))
 SMARK = os.path.expanduser(os.environ.get(
     "SMARK", "~/zerdani/buffer/octonet/archive2/statics_done.marker"))
 SEED = int(os.environ.get("SEED", "0"))
@@ -94,17 +98,36 @@ def build(scenes):
     pickle.dump(out, open(cf, "wb"), protocol=4)
     return out
 
-SCACHE = {}
+SCACHE, RIDMETA, TEMPLATES = {}, {}, {}
+def _raw_static(r):
+    f = f"{TOK}/statics/{r:06d}.npy"
+    v = np.load(f).astype(np.float32) if os.path.exists(f) \
+        else np.zeros(399, np.float32)
+    a = v[:171]; c = v[171:]
+    a = (a - a.mean()) / (a.std() + 1e-6)
+    return np.r_[a, c].astype(np.float32)
+
+def build_templates():
+    """per-(scene, node) median static = room print; label-free."""
+    man = pd.read_csv(f"{TOK}/manifest.csv")
+    man = man[man.scene.isin([1, 2, 3, 4])]
+    for r in man.itertuples():
+        RIDMETA[int(r.rid)] = (int(r.scene), r.node)
+    rng_ = np.random.default_rng(1)
+    for (sc, nd), g in man.groupby(["scene", "node"]):
+        rs = rng_.permutation(g.rid.values)[:400]
+        vs = [_raw_static(int(r)) for r in rs]
+        TEMPLATES[(int(sc), nd)] = np.median(np.stack(vs), 0)
+    print(f"templates built for {sorted(TEMPLATES)}", flush=True)
+
 def get_static(rids):
     vs = []
     for r in rids:
         if r not in SCACHE:
-            f = f"{TOK}/statics/{r:06d}.npy"
-            v = np.load(f).astype(np.float32) if os.path.exists(f) \
-                else np.zeros(399, np.float32)
-            a = v[:171]; c = v[171:]
-            a = (a - a.mean()) / (a.std() + 1e-6)
-            SCACHE[r] = np.r_[a, c].astype(np.float32)
+            v = _raw_static(r)
+            if TEMPL and r in RIDMETA:
+                v = v - TEMPLATES.get(RIDMETA[r], 0)
+            SCACHE[r] = v.astype(np.float32)
         vs.append(SCACHE[r])
     return np.stack(vs)                      # (3, 399)
 
@@ -158,6 +181,7 @@ def main():
     if STATIC:
         while not os.path.exists(SMARK):
             print("waiting for statics ...", flush=True); time.sleep(60)
+        if TEMPL: build_templates()
     mu = np.zeros((NJ, 3)); sd = np.ones((NJ, 3))
     for j in range(NJ):
         vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
@@ -173,7 +197,7 @@ def main():
     net = PoseTok().to(dev)
     print(f"params {sum(p.numel() for p in net.parameters())/1e6:.1f}M", flush=True)
     opt = torch.optim.Adam(net.parameters(), lr=LR, weight_decay=1e-5)
-    OUTD = os.path.expanduser("~/zerdani/buffer/octonet/posetok_runs")
+    OUTD = OUTDIR
     os.makedirs(OUTD, exist_ok=True)
     def qev(ds, cap=150):
         rs, ratio, tc = [], [], []
@@ -224,7 +248,15 @@ def main():
             X[k, :len(it[0])] = torch.from_numpy(it[0].astype(np.float32))
             mask[k, :len(it[0])] = False
             Y[k, :len(it[1])] = torch.from_numpy(it[1])
-            if STATIC: S[k] = torch.from_numpy(get_static(it[3]))
+            if STATIC:
+                u = rng.random()
+                if u < SDROP:
+                    pass                                  # zeros = dropout
+                elif u < SDROP + SWAP:
+                    oth = tr[rng.integers(len(tr))]
+                    S[k] = torch.from_numpy(get_static(oth[3]))
+                else:
+                    S[k] = torch.from_numpy(get_static(it[3]))
         X, mask, Y, S = X.to(dev), mask.to(dev), Y.to(dev), S.to(dev)
         pred = net(X, mask, nws, S if STATIC else None)   # in Z-space
         Z = (Y - MUt) / SDt
