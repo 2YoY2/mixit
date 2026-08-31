@@ -34,6 +34,7 @@ NL = int(os.environ.get("LAYERS", "6"))
 MAXT = int(os.environ.get("MAXT", "512"))
 EVERY = int(os.environ.get("EVERY", "500"))
 SEED = int(os.environ.get("SEED", "0"))
+TRENVS = set(e for e in os.environ.get("TRENVS", "").split(",") if e)
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
 
@@ -84,6 +85,7 @@ def load_items():
         e = (10.0 ** le).astype(np.float32)
         e = e / (e.mean() + 1e-12)          # per-origin energy scale out
         items.append(dict(X=X, e=e, n=int(r.number_of_users),
+                          env=r.environment,
                           cell=(r.environment, float(r.wifi_band))))
     return items
 
@@ -125,26 +127,37 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
     items = load_items()
     rng = np.random.default_rng(SEED)
-    ix = rng.permutation(len(items))
+    intrain = [i for i, it in enumerate(items)
+               if not TRENVS or it["env"] in TRENVS]
+    xroom = [i for i, it in enumerate(items)
+             if TRENVS and it["env"] not in TRENVS]
+    ix = rng.permutation(intrain)
     ho = set(ix[:int(len(ix) * 0.1)].tolist())
     cells = {}
-    for i, it in enumerate(items):
+    for i in intrain:
         if i in ho: continue
-        cells.setdefault(it["cell"], []).append(i)
+        cells.setdefault(items[i]["cell"], []).append(i)
     cells = {k: v for k, v in cells.items() if len(v) >= 10}
     ckeys = list(cells)
-    hocells = {}
-    for i in ho:
-        hocells.setdefault(items[i]["cell"], []).append(i)
-    evpairs = []
-    for k, v in hocells.items():
-        v1 = [i for i in v if items[i]["n"] == 1]
-        for _ in range(24):
-            if len(v1) < 2: break
-            a, b = rng.choice(v1, 2, replace=False)
-            evpairs.append((int(a), int(b)))
-    print(f"{len(items)} items (0/1-user), {len(cells)} cells, "
-          f"{len(evpairs)} eval unions, dev={dev}", flush=True)
+
+    def mkpairs(pool):
+        pc = {}
+        for i in pool:
+            pc.setdefault(items[i]["cell"], []).append(i)
+        prs = []
+        for k, v in pc.items():
+            v1 = [i for i in v if items[i]["n"] == 1]
+            for _ in range(24):
+                if len(v1) < 2: break
+                a, b = rng.choice(v1, 2, replace=False)
+                prs.append((int(a), int(b)))
+        return prs
+    evpairs = mkpairs(sorted(ho))
+    evpairs_x = mkpairs(xroom)
+    print(f"{len(items)} items (0/1-user) | train envs "
+          f"{sorted(TRENVS) if TRENVS else 'ALL'} ({len(intrain)}) | "
+          f"x-room items {len(xroom)} | {len(cells)} cells | eval unions "
+          f"in {len(evpairs)} / x {len(evpairs_x)} | dev={dev}", flush=True)
 
     model = SetSep().to(dev)
     print(f"params {sum(p.numel() for p in model.parameters())/1e6:.1f}M",
@@ -159,12 +172,13 @@ def main():
         sch.load_state_dict(ck["sch"]); step0 = ck["step"]; best = ck["best"]
         print(f"resumed from step {step0}", flush=True)
 
-    def evaluate():
+    def evaluate(pairs):
+        if not pairs: return float("nan")
         model.eval()
         ps = []
         with torch.no_grad():
-            for i0 in range(0, len(evpairs), 16):
-                X, E, O, mask, lens = unions(items, evpairs[i0:i0 + 16])
+            for i0 in range(0, len(pairs), 16):
+                X, E, O, mask, lens = unions(items, pairs[i0:i0 + 16])
                 a = model(X, mask)
                 for k, L in enumerate(lens):
                     ps.append(purity(a[k, :L].argmax(1).cpu().numpy(),
@@ -189,16 +203,17 @@ def main():
                             for k, L in enumerate(lens)]).mean()
         opt.zero_grad(); loss.backward(); opt.step(); sch.step()
         if step % EVERY == 0:
-            pu = evaluate()
+            pu = evaluate(evpairs)
+            px = evaluate(evpairs_x)
             ck = {"model": model.state_dict(), "opt": opt.state_dict(),
                   "sch": sch.state_dict(), "step": step, "best": best}
             torch.save(ck, f"{RUNS}/last.pt")
-            if pu > best:
+            if pu > best:                      # select in-domain, never peek
                 best = pu
                 torch.save(ck, f"{RUNS}/best.pt")
-            print(f"[{step}] mixit {loss.item():.4f}  purity {pu:.3f} "
-                  f"(best {best:.3f})  {(time.time()-t0)/3600:.2f}h",
-                  flush=True)
+            print(f"[{step}] mixit {loss.item():.4f}  purity in {pu:.3f} "
+                  f"(best {best:.3f})  XROOM {px:.3f}  "
+                  f"{(time.time()-t0)/3600:.2f}h", flush=True)
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
                 "sch": sch.state_dict(), "step": step, "best": best},
                f"{RUNS}/last.pt")

@@ -25,6 +25,7 @@ OUT = os.path.expanduser(os.environ.get(
 CKPT = os.path.expanduser(os.environ.get(
     "CK", "~/zerdani/buffer/octonet/archive/limbtok12_best_step43k_gate71.pt"))
 ASTEPS = int(os.environ.get("ASTEPS", "3000"))
+TESTENV = os.environ.get("TESTENV", "")
 B = int(os.environ.get("B", "24"))
 LR = float(os.environ.get("LR", "5e-4"))
 MAXT = int(os.environ.get("MAXT", "768"))
@@ -212,9 +213,14 @@ def main():
     hp = int(len(ixp) * 0.9)
     sub = [items[i] for i in ixp[:hp]]
     net = train(sub, [it["acts"][0] for it in sub], len(vocab), ASTEPS, "act")
-    for nU in (2, 3, 4, 5):
+    groups = [("ALL", None)] if not TESTENV else \
+        [("TRAIN-ENVS", False), (f"TESTROOM {TESTENV}", True)]
+    for gname, iste in groups:
+      print(f"  --- {gname}", flush=True)
+      for nU in (2, 3, 4, 5):
         mi = [i for i, it in enumerate(items)
-              if it["n"] == nU and len(it["acts"]) == nU]
+              if it["n"] == nU and len(it["acts"]) == nU
+              and (iste is None or (it["env"] == TESTENV) == iste)]
         if len(mi) < 30: continue
         sc_sl, dis_sl, gts = [], [], []
         for i in mi:
