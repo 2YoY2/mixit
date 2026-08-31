@@ -27,7 +27,9 @@ RUNS = os.path.expanduser(os.environ.get(
 STEPS = int(os.environ.get("STEPS", "25000"))
 HOURS = float(os.environ.get("HOURS", "3"))
 BM = int(os.environ.get("BM", "8"))
-LR = float(os.environ.get("LR", "3e-4"))
+LR = float(os.environ.get("LR", "1e-4"))
+WARM = int(os.environ.get("WARM", "1000"))
+ENTW = float(os.environ.get("ENTW", "0.03"))
 M = int(os.environ.get("M", "8"))
 D = int(os.environ.get("DIM", "256"))
 NL = int(os.environ.get("LAYERS", "6"))
@@ -58,10 +60,13 @@ def mixit_loss(a, e, origin):
         for b in range(1, 2 ** M - 1):
             ms.append([float((b >> k) & 1) for k in range(M)])
         PARTS = torch.tensor(ms, device=a.device)
+    e = torch.clamp(e, max=torch.quantile(e, 0.95))  # tame heavy tail
     p = a @ PARTS.T
     w = e / (e.sum() + 1e-8)
     err = ((p - origin[:, None]) ** 2 * w[:, None]).sum(0)
-    return err.min()
+    q = (a * w[:, None]).sum(0)                      # slot usage
+    ent = -(q * torch.log(q + 1e-8)).sum()
+    return err.min() + ENTW * (math.log(M) - ent)    # anti-collapse
 
 def load_items():
     an = pd.read_csv(f"{TOK}/manifest.csv")
@@ -163,7 +168,9 @@ def main():
     print(f"params {sum(p.numel() for p in model.parameters())/1e6:.1f}M",
           flush=True)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
-    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=STEPS)
+    sch = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda s: min(1.0, (s + 1) / WARM) *
+        0.5 * (1.0 + math.cos(math.pi * s / STEPS)))
     step0, best = 0, -math.inf
     if os.path.exists(f"{RUNS}/last.pt"):
         ck = torch.load(f"{RUNS}/last.pt", map_location=dev,
