@@ -27,8 +27,10 @@ ROOT = os.path.expanduser(os.environ.get("ROOT", "~/zerdani/buffer/PerceptAlign"
 OUT = os.path.expanduser(os.environ.get("OUT", "~/zerdani/buffer/octonet/pa_tokens"))
 NPROC = int(os.environ.get("NPROC", "6"))
 LIMIT = int(os.environ.get("LIMIT", "0"))
-FS, WINF, HOPF = 400.0, 256, 128
-KTAP, L = 4, 20
+FS = 400.0
+WINF = int(os.environ.get("WINF", "256"))    # window (samples @400Hz)
+HOPF = int(os.environ.get("HOPF", "128"))    # hop — fine grid: WINF=128
+KTAP, L = 4, 20                              # HOPF=32 (12.5Hz token rate)
 NPH, NPS = 37, 37
 CHUNK = 128                                   # bins per steering-proj chunk
 PAT = re.compile(r"Scene(\d+)/user(\d+)/action(\d+)/([^/]+)/csi_mat/(\d+)-r(\d)\.mat$")
