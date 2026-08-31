@@ -48,7 +48,9 @@ net.load_state_dict(ck["model"]); net.eval()
 print(f"MH model {CK} step {ck.get('step')} K={K}", flush=True)
 
 # mu/sd from the training-split recipe (needed to de-normalize hypotheses)
-_tr_all = ptk.build([1, 2, 3])
+# MUSC must match the scenes the pose ckpt was TRAINED on (s1-model: MUSC=1)
+MUSC = [int(v) for v in os.environ.get("MUSC", "1,2,3").split(",")]
+_tr_all = ptk.build(MUSC)
 _rng = np.random.default_rng(ptk.SEED)
 _ix = _rng.permutation(len(_tr_all))
 _tr = [_tr_all[i] for i in _ix[:int(len(_ix) * 0.95)]]
@@ -63,7 +65,7 @@ RID2ACT = {int(r.rid): int(r.act) for r in man.itertuples()}
 RID2SC = {int(r.rid): int(r.scene) for r in man.itertuples()}
 
 def pose_sets(scenes):
-    ds = _tr_all if scenes == [1, 2, 3] else ptk.build(scenes)
+    ds = _tr_all if scenes == MUSC else ptk.build(scenes)
     out = []
     with torch.no_grad():
         for it in ds:
