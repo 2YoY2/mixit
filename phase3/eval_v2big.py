@@ -16,7 +16,7 @@ ptk = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ptk)
 
 CKPT = os.path.expanduser(os.environ.get(
-    "CKPT", "~/zerdani/buffer/octonet/posetok_v2big_runs/best.pt"))
+    "POSECK", "~/zerdani/buffer/octonet/posetok_v2big_runs/best.pt"))
 dev = ptk.dev
 NJ, ROOTJ = ptk.NJ, ptk.ROOTJ
 
