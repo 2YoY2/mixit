@@ -21,6 +21,11 @@ TOK = os.path.expanduser(os.environ.get("TOK", "~/zerdani/buffer/octonet/pa_toke
 TOK3 = os.path.expanduser(os.environ.get(
     "TOK3", "~/zerdani/buffer/octonet/pa_tokens_tokmap41"))
 NST = int(os.environ.get("NST", "200"))
+# DCRM=1: subtract each antenna row's subcarrier mean from the ensemble
+# static before peak estimation — removes the psi=0 zero-delay (DC)
+# component exactly (room-shared per probes 38/39), so the peak is the
+# dominant ROOM-SPECIFIC path and the map gains a real psi axis.
+DCRM = int(os.environ.get("DCRM", "0"))
 NODES = ["r1", "r2", "r3"]
 L, NPH, NPS = 20, 37, 37
 PH = np.linspace(-np.pi, np.pi, NPH, endpoint=False)
@@ -58,7 +63,9 @@ def main():
                 if not os.path.exists(f): continue
                 v = np.load(f)
                 cs.append((v[171:285] + 1j * v[285:]).reshape(2, 57))
-            pk[sc] = peak_of(np.mean(cs, 0).astype(np.complex64))
+            cm = np.mean(cs, 0).astype(np.complex64)
+            if DCRM: cm = cm - cm.mean(axis=1, keepdims=True)
+            pk[sc] = peak_of(cm)
             print(f"  ({sc},{nd}): n={len(cs)} peak phi {pk[sc][0]:+.2f} "
                   f"psi {pk[sc][1]:+.2f}", flush=True)
         DP[nd] = (wrap(pk[1][0] - pk[4][0]), wrap(pk[1][1] - pk[4][1]))
