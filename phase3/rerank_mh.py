@@ -31,13 +31,15 @@ K, NJ, ROOTJ, dev = mh.K, ptk.NJ, ptk.ROOTJ, ptk.dev
 
 CK = os.path.expanduser(os.environ.get(
     "CK", "~/zerdani/buffer/octonet/posetok_mh_runs/last.pt"))
+TRSC = [int(v) for v in os.environ.get("TRSC", "1,2,3").split(",")]
+TESC = [int(v) for v in os.environ.get("TESC", "4").split(",")]
 net = mh.MHPoseTok().to(dev)
 ck = torch.load(CK, map_location=dev, weights_only=False)
 net.load_state_dict(ck["model"]); net.eval()
 print(f"ckpt {CK} step {ck.get('step')}", flush=True)
 
-tr_all = ptk.build([1, 2, 3])
-te = ptk.build([4])
+tr_all = ptk.build(TRSC)
+te = ptk.build(TESC)
 rng = np.random.default_rng(ptk.SEED)
 ix = rng.permutation(len(tr_all))
 ho = [tr_all[i] for i in ix[int(len(ix) * 0.95):]]
@@ -139,7 +141,7 @@ print("winner-by-action concentration (train): " + "  ".join(
     f"a{a}:{np.bincount([c['oracle'] for c in TRC if c['act']==a], minlength=K).max()/max(1,len([1 for c in TRC if c['act']==a]))*100:.0f}%"
     for a in sorted(actmaj)), flush=True)
 
-for ds, tag in ((ho, "heldout 1-3"), (te, "TEST scene4")):
+for ds, tag in ((ho, f"heldout {TRSC}"), (te, f"TEST {TESC}")):
     cs = clipstats(ds, tag)
     print(f"[{tag}] (n={len(cs)})", flush=True)
     score(cs, "sel", lambda c: int(c["sel"].argmax()))

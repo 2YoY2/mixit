@@ -45,6 +45,8 @@ SELW = float(os.environ.get("SELW", "0.1"))
 SOFTPCK = float(os.environ.get("SOFTPCK", "0"))
 L1W = float(os.environ.get("L1W", "1.0"))
 TAU = float(os.environ.get("TAU", "0.01"))       # sigmoid temp (m)
+TRSC = [int(v) for v in os.environ.get("TRSC", "1,2,3").split(",")]
+TESC = [int(v) for v in os.environ.get("TESC", "4").split(",")]
 OUTD = os.path.expanduser(os.environ.get(
     "OUT", "~/zerdani/buffer/octonet/posetok_mh_runs"))
 dev = ptk.dev
@@ -139,14 +141,14 @@ def main():
     print(f"MH-WTA pose head: K={K} EPSW={EPSW} SELW={SELW} HDIM={HDIM} "
           f"ENCL={ENCL} STATIC={STATIC} B={B} STEPS={STEPS} HOURS={HOURS} "
           f"SOFTPCK={SOFTPCK} L1W={L1W} TAU={TAU}", flush=True)
-    tr_all = ptk.build([1, 2, 3])
-    te = ptk.build([4])
+    tr_all = ptk.build(TRSC)
+    te = ptk.build(TESC)
     rng = np.random.default_rng(ptk.SEED)
     ix = rng.permutation(len(tr_all))
     ho = [tr_all[i] for i in ix[int(len(ix) * 0.95):]]
     tr = [tr_all[i] for i in ix[:int(len(ix) * 0.95)]]
-    print(f"train {len(tr)} / ho {len(ho)} / test-scene4 {len(te)}",
-          flush=True)
+    print(f"train {len(tr)} (scenes {TRSC}) / ho {len(ho)} / "
+          f"test {len(te)} (scenes {TESC})", flush=True)
     mu = np.zeros((NJ, 3)); sd = np.ones((NJ, 3))
     for j in range(NJ):
         vs = np.concatenate([it[1][:, j][np.isfinite(it[1][:, j]).all(-1)]

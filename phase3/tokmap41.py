@@ -26,6 +26,9 @@ NST = int(os.environ.get("NST", "200"))
 # component exactly (room-shared per probes 38/39), so the peak is the
 # dominant ROOM-SPECIFIC path and the map gains a real psi axis.
 DCRM = int(os.environ.get("DCRM", "0"))
+NEG = int(os.environ.get("NEG", "0"))    # placebo: negate the shifts —
+                                         # genuine calibration must HURT here
+SRC = int(os.environ.get("SRC", "4"))    # the room being mapped -> room 1
 NODES = ["r1", "r2", "r3"]
 L, NPH, NPS = 20, 37, 37
 PH = np.linspace(-np.pi, np.pi, NPH, endpoint=False)
@@ -54,7 +57,7 @@ def main():
     DP = {}
     for nd in NODES:
         pk = {}
-        for sc in (1, 4):
+        for sc in (1, SRC):
             rids = list(man[(man.scene == sc) & (man.node == nd)].rid)
             rng.shuffle(rids)
             cs = []
@@ -68,9 +71,10 @@ def main():
             pk[sc] = peak_of(cm)
             print(f"  ({sc},{nd}): n={len(cs)} peak phi {pk[sc][0]:+.2f} "
                   f"psi {pk[sc][1]:+.2f}", flush=True)
-        DP[nd] = (wrap(pk[1][0] - pk[4][0]), wrap(pk[1][1] - pk[4][1]))
-        print(f"  map4->1 {nd}: dphi {DP[nd][0]:+.2f}  dpsi {DP[nd][1]:+.2f}",
-              flush=True)
+        DP[nd] = (wrap(pk[1][0] - pk[SRC][0]), wrap(pk[1][1] - pk[SRC][1]))
+        if NEG: DP[nd] = (-DP[nd][0], -DP[nd][1])
+        print(f"  map{SRC}->1 {nd}{' NEGATED' if NEG else ''}: "
+              f"dphi {DP[nd][0]:+.2f}  dpsi {DP[nd][1]:+.2f}", flush=True)
 
     for name in ("manifest.csv", "pose", "imu", "statics", "statics_add",
                  "tenv", "static_peaks.npz"):
@@ -86,7 +90,7 @@ def main():
         src = f"{TOK}/tokens/{rid:06d}.npz"
         dst = f"{TOK3}/tokens/{rid:06d}.npz"
         if not os.path.exists(src) or os.path.lexists(dst): continue
-        if sc != 4:
+        if sc != SRC:
             os.symlink(src, dst); nlink += 1
             continue
         z = np.load(src)
@@ -97,7 +101,7 @@ def main():
         np.savez(dst, toks=toks.astype(np.float32), nw=z["nw"])
         ndone += 1
         if ndone % 1000 == 0: print(f"  {ndone} mapped", flush=True)
-    print(f"tokmap done: {ndone} scene-4 recs mapped, {nlink} symlinked -> "
+    print(f"tokmap done: {ndone} scene-{SRC} recs mapped, {nlink} symlinked -> "
           f"{TOK3}", flush=True)
 
 if __name__ == "__main__":
