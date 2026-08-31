@@ -25,6 +25,10 @@ POSECKPT = os.path.expanduser(os.environ.get(
 STEPS = int(os.environ.get("STEPS", "6000"))
 TRSC = [int(v) for v in os.environ.get("TRSC", "1,2,3").split(",")]
 TESC = [int(v) for v in os.environ.get("TESC", "4").split(",")]
+INDOM = float(os.environ.get("INDOM", "0"))   # >0: heldout fraction of TRSC
+                                              # clips as in-domain test set
+                                              # (TESC ignored), seed-0 split
+                                              # like act_from_tokens
 B = int(os.environ.get("B", "64"))
 NC = 17
 NAMES = ["L-arm-str", "R-arm-str", "both-str", "L-lat-rai", "R-lat-rai",
@@ -41,6 +45,7 @@ print(f"pose model {POSECKPT} step {ck.get('step')}", flush=True)
 
 man = pd.read_csv(f"{ptk.TOK}/manifest.csv")
 RID2ACT = {int(r.rid): int(r.act) for r in man.itertuples()}
+RID2SC = {int(r.rid): int(r.scene) for r in man.itertuples()}
 
 def pose_sets(scenes):
     ds = ptk.build(scenes)
@@ -61,7 +66,8 @@ def pose_sets(scenes):
             if act is None: continue
             gt = np.nan_to_num(P.reshape(len(P), -1))
             out.append((pr.reshape(len(pr), -1).astype(np.float32),
-                        gt.astype(np.float32), act - 1))
+                        gt.astype(np.float32), act - 1,
+                        RID2SC.get(int(rids[0]), 0)))
     return out
 
 class Cls(nn.Module):
@@ -112,10 +118,27 @@ def run_arm(tag, ai, tr, te):
 
 print(f"building pose sets (train {TRSC}, test {TESC})", flush=True)
 tr = pose_sets(TRSC)
-te = pose_sets(TESC)
+if INDOM > 0:
+    rng0 = np.random.default_rng(0)
+    ixp = rng0.permutation(len(tr))
+    ncut = int(len(ixp) * (1 - INDOM))
+    te = [tr[i] for i in ixp[ncut:]]
+    tr = [tr[i] for i in ixp[:ncut]]
+    print(f"IN-DOMAIN mode: heldout {INDOM:.0%} of scenes {TRSC} clips "
+          f"as test (TESC ignored)", flush=True)
+else:
+    te = pose_sets(TESC)
 print(f"train {len(tr)} test {len(te)}", flush=True)
 Pp, Yp = run_arm("PRED-pose", 0, tr, te)
 Pg, Yg = run_arm("GT-pose ceiling", 1, tr, te)
+if INDOM > 0:
+    sc_arr = np.array([it[3] for it in te])
+    print("\nper-scene (in-domain heldout):", flush=True)
+    for sc in sorted(set(sc_arr.tolist())):
+        m = sc_arr == sc
+        print(f"  scene{sc}: PRED {np.mean(Pp[m] == Yp[m]):.3f}  "
+              f"GT-ceiling {np.mean(Pg[m] == Yg[m]):.3f}  (n={m.sum()})",
+              flush=True)
 print("\nconfusion (PRED-pose arm, test scenes, rows=true, % of row, top-3 shown):")
 for k in range(NC):
     m = Yp == k
