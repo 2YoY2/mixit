@@ -37,6 +37,14 @@ spec.loader.exec_module(ptk)
 K = int(os.environ.get("K", "8"))
 EPSW = float(os.environ.get("EPSW", "0.05"))
 SELW = float(os.environ.get("SELW", "0.1"))
+# soft-PCK objective (user hypothesis: MPJPE-style loss punishes bold
+# trajectories linearly -> frozen postures win; threshold reward fixes the
+# incentive).  SOFTPCK>0 adds weight*(1 - soft-PCK@20/50) to each
+# hypothesis loss AND to winner selection; L1W scales the L1 anchor
+# (needed: saturating loss alone has dead gradients far from GT).
+SOFTPCK = float(os.environ.get("SOFTPCK", "0"))
+L1W = float(os.environ.get("L1W", "1.0"))
+TAU = float(os.environ.get("TAU", "0.01"))       # sigmoid temp (m)
 OUTD = os.path.expanduser(os.environ.get(
     "OUT", "~/zerdani/buffer/octonet/posetok_mh_runs"))
 dev = ptk.dev
@@ -106,6 +114,16 @@ def hyp_losses(pred, Y, MUt, SDt):
         l_ = (torch.where(Ms[:, :, None], d, torch.zeros_like(d))
               .sum(dim=(1, 3, 4)) / Ms.sum(dim=(1, 2, 3))[:, None]
               .clamp(min=1) / 3)                                 # (B,K)
+        l_ = L1W * l_
+        if SOFTPCK > 0:
+            dr = ((pred - torch.nan_to_num(Zs)[:, :, None]) * SDt) \
+                .norm(dim=-1)                                    # B,nq,K,NJ (m)
+            hit = 0.5 * torch.sigmoid((0.02 - dr) / TAU) \
+                + 0.5 * torch.sigmoid((0.05 - dr) / TAU)
+            Msq = Ms.squeeze(-1)[:, :, None]                     # B,nq,1,NJ
+            sc = ((hit * Msq).sum(dim=(1, 3))
+                  / Msq.sum(dim=(1, 3)).clamp(min=1))            # (B,K)
+            l_ = l_ + SOFTPCK * (1.0 - sc)
         cands.append(l_)
     L = torch.stack(cands, -1).min(-1).values                    # (B,K)
     Z0 = torch.nan_to_num(Z)
@@ -119,8 +137,8 @@ def hyp_losses(pred, Y, MUt, SDt):
 
 def main():
     print(f"MH-WTA pose head: K={K} EPSW={EPSW} SELW={SELW} HDIM={HDIM} "
-          f"ENCL={ENCL} STATIC={STATIC} B={B} STEPS={STEPS} HOURS={HOURS}",
-          flush=True)
+          f"ENCL={ENCL} STATIC={STATIC} B={B} STEPS={STEPS} HOURS={HOURS} "
+          f"SOFTPCK={SOFTPCK} L1W={L1W} TAU={TAU}", flush=True)
     tr_all = ptk.build([1, 2, 3])
     te = ptk.build([4])
     rng = np.random.default_rng(ptk.SEED)
