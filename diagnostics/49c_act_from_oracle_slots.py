@@ -71,6 +71,8 @@ def harvest(ids, r2a, tag):
         if not (os.path.exists(tf) and os.path.exists(gf)): continue
         z = np.load(tf); t = z["toks"]; nw = int(z["nw"])
         if len(t) < 16: continue
+        if len(t) > 1024:
+            t = t[np.argsort(-t[:, 4])[:1024]]
         gi = np.asarray(np.load(gf), np.float32)
         g2 = gi.copy()
         for i_ in range(5):
@@ -143,7 +145,7 @@ def run_arm(key, tr, ho, te, rng):
     t0 = time.time()
     for step in range(STEPS):
         ixb = [bycls[keys[c]][rng.integers(len(bycls[keys[c]]))]
-               for c in rng.integers(0, len(keys), 32)]
+               for c in rng.integers(0, len(keys), 16)]
         X, mask = batch(tr, ixb)
         y = torch.tensor([tr[i]["act"] for i in ixb]).to(dev)
         loss = nn.functional.cross_entropy(net(X, mask), y)
@@ -155,8 +157,8 @@ def run_arm(key, tr, ho, te, rng):
     def ev(ds):
         P, Y = [], []
         with torch.no_grad():
-            for i0 in range(0, len(ds), 32):
-                ix = list(range(i0, min(i0 + 32, len(ds))))
+            for i0 in range(0, len(ds), 16):
+                ix = list(range(i0, min(i0 + 16, len(ds))))
                 X, mask = batch(ds, ix)
                 P += list(net(X, mask).argmax(1).cpu().numpy())
                 Y += [ds[i]["act"] for i in ix]
@@ -170,9 +172,8 @@ def main():
     tr_ids = rng.permutation(np.array(
         man[man.split == "train"].rid.values))[:NTR]
     te_ids = rng.permutation(np.array(
-        man[(man.split == "test") & (man.scene == "Scene4")].rid.values
-        if "scene" in man.columns else
-        man[man.split == "test"].rid.values))[:NTE]
+        man[(man.split == "test") & (man.scene.astype(str).str.contains(
+            "4"))].rid.values))[:NTE]
     tr_all = harvest(tr_ids, r2a, "train")
     te = harvest(te_ids, r2a, "test4")
     ix = rng.permutation(len(tr_all))
