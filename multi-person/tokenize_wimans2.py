@@ -241,7 +241,18 @@ def main():
         np.savez(tf, **{f"T_{e}_{b}": v for (e, b), v in TMPL.items()},
                  **{f"F_{e}_{b}": v for (e, b), v in FLOOR.items()})
 
-    jobs = [(r.label, r.environment, r.wifi_band) for r in an.itertuples()]
+    rows = list(an.itertuples())
+    if os.environ.get("ONLY", "") == "still":
+        def is_still(r):
+            n = int(r.number_of_users)
+            if n == 0: return True
+            acts = [str(getattr(r, f"user_{k}_activity")).strip()
+                    for k in range(1, n + 1)]
+            return all(a == "nothing" for a in acts)
+        rows = [r for r in rows if is_still(r)]
+        print(f"ONLY=still: {len(rows)} samples (all-nothing + empties)",
+              flush=True)
+    jobs = [(r.label, r.environment, r.wifi_band) for r in rows]
     rng.shuffle(jobs)
     if LIMIT: jobs = jobs[:LIMIT]
     print(f"=== pass 2: tokenize {len(jobs)} samples", flush=True)
