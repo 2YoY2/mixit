@@ -23,6 +23,8 @@ PREP1 = os.path.expanduser(os.environ.get(
 NRID = int(os.environ.get("NRID", "60"))
 WINF = int(os.environ.get("WINF", "256"))
 HOPF = int(os.environ.get("HOPF", "128"))
+MINTOK = int(os.environ.get("MINTOK", "4"))  # min tokens per window (line
+                                             # tokenizers are sparse: use 1)
 MAXCORR = 0.7
 DEV = ["LW", "RW", "LP", "RP", "HD"]
 
@@ -48,7 +50,7 @@ def corr(a, b):
 def one(tokf, gtf):
     z = np.load(tokf)
     toks, nw = z["toks"].astype(np.float64), int(z["nw"])
-    if len(toks) < 4 * nw or nw < 8: return None
+    if len(toks) < MINTOK * nw or nw < 8: return None
     eng = 10.0 ** toks[:, 4]
     gi = np.asarray(np.load(gtf), np.float32)
     g2 = gi.copy()
