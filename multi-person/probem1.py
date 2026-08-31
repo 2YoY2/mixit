@@ -29,6 +29,7 @@ OUT = os.path.expanduser(os.environ.get(
     "WTOK", "~/zerdani/buffer/octonet/wimans_tokens"))
 SAMPN = int(os.environ.get("SAMPN", "150"))
 MAXN = int(os.environ.get("MAXN", "400"))
+STRATS = [s for s in os.environ.get("STRATS", "").split(",") if s]
 rng = np.random.default_rng(51)
 
 def kmeans(X, k, iters=40, restarts=3):
@@ -130,6 +131,7 @@ def main():
                  "MOVING" if still == 0 else "MIXED")
         rows.append((r.label, n, strat, r.environment))
     df = pd.DataFrame(rows, columns=["label", "n", "strat", "env"])
+    if STRATS: df = df[df.strat.isin(STRATS)]
     print(df.groupby(["strat", "n"]).size(), flush=True)
 
     recs = []
