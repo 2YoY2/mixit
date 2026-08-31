@@ -60,6 +60,26 @@ def envelopes(S12, T):
     w = E / np.maximum(E.sum(1, keepdims=True), 1e-12)
     return E.sum(1), (w * f).sum(1)
 
+NSLOT = len(ptk.POSESLOTS)
+def slot_envs(S12, T):
+    """(NSLOT, T) per-slot energy summed over the 3 receivers.
+    S12 layout: rx blocks of NSLOT*6 cols; col si*6 = log10 energy."""
+    s = S12[:T].astype(np.float64)
+    ns6 = NSLOT * 6
+    return np.stack([sum(10.0 ** s[:, r * ns6 + si * 6] for r in range(3))
+                     for si in range(NSLOT)])
+
+from itertools import permutations
+LIMBS = {"LW": [7], "RW": [4], "Lleg": [13, 14], "Rleg": [10, 11]}
+def slot_score(hyp, sE):
+    """best-assignment mean corr between slot envelopes and the
+    hypothesis's per-limb speed profiles (phase-2 gate protocol)."""
+    spd = np.linalg.norm(np.diff(hyp, axis=0), axis=-1)      # (T-1, NJ)
+    le = [spd[:, js].mean(1) for js in LIMBS.values()]
+    C = np.array([[zc(sE[si][1:], e) for e in le] for si in range(NSLOT)])
+    return max(np.mean([C[si, p[si]] for si in range(NSLOT)])
+               for p in permutations(range(len(le)), NSLOT))
+
 def zc(a, b):
     a = np.asarray(a, np.float64); b = np.asarray(b, np.float64)
     n = min(len(a), len(b)); a, b = a[:n], b[:n]
@@ -83,11 +103,13 @@ def clipstats(ds, tag):
             mp = np.array([r[0] if r else 1e9 for r in rs])
             spd = np.linalg.norm(np.diff(hyps, axis=0), axis=-1).mean(-1).T
             eE, eF = envelopes(S12, len(P))
+            sE = slot_envs(S12, len(P))
             cE = np.array([zc(spd[k_], eE[1:]) for k_ in range(K)])
             cF = np.array([zc(spd[k_], eF[1:]) for k_ in range(K)])
+            cS = np.array([slot_score(hyps[:, k_], sE) for k_ in range(K)])
             out.append(dict(
                 rs=rs, mp=mp, oracle=int(mp.argmin()),
-                sel=sl[0].cpu().numpy(), cE=cE, cF=cF,
+                sel=sl[0].cpu().numpy(), cE=cE, cF=cF, cS=cS,
                 act=R2A.get(int(rids[0]), 0),
                 mean_r=ptk.mpjpe_pck(hyps.mean(1), P)))
     print(f"{tag}: {len(out)} clips", flush=True)
@@ -123,7 +145,9 @@ for ds, tag in ((ho, "heldout 1-3"), (te, "TEST scene4")):
     score(cs, "sel", lambda c: int(c["sel"].argmax()))
     score(cs, "env-E", lambda c: int(c["cE"].argmax()))
     score(cs, "env-F", lambda c: int(c["cF"].argmax()))
+    score(cs, "slotperm", lambda c: int(c["cS"].argmax()))
     score(cs, "sel+env", lambda c: int((zs(c["sel"]) + zs(c["cE"])).argmax()))
+    score(cs, "sel+slot", lambda c: int((zs(c["sel"]) + zs(c["cS"])).argmax()))
     score(cs, "act-maj", lambda c: actmaj.get(c["act"], 0))
     score(cs, "oracle", lambda c: c["oracle"])
     mr = np.array([c["mean_r"] for c in cs if c["mean_r"]])
