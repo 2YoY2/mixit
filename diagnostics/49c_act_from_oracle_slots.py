@@ -167,11 +167,12 @@ def main():
     man = pd.read_csv(f"{TOK}/manifest.csv")
     r2a = {int(r.rid): int(r.act) for r in man.itertuples()}
     rng = np.random.default_rng(49)
-    tr_ids = rng.permutation(man[man.split == "train"].rid.values)[:NTR]
-    te_ids = rng.permutation(
+    tr_ids = rng.permutation(np.array(
+        man[man.split == "train"].rid.values))[:NTR]
+    te_ids = rng.permutation(np.array(
         man[(man.split == "test") & (man.scene == "Scene4")].rid.values
         if "scene" in man.columns else
-        man[man.split == "test"].rid.values)[:NTE]
+        man[man.split == "test"].rid.values))[:NTE]
     tr_all = harvest(tr_ids, r2a, "train")
     te = harvest(te_ids, r2a, "test4")
     ix = rng.permutation(len(tr_all))
