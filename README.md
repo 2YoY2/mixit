@@ -1,102 +1,30 @@
-# mixit
+# mixit — session handoff (2026-08-31)
 
-**Phase 2 working pipeline: [`phase2/`](phase2/) — raw CSI → MUSIC tokens →
-identity-free limb clustering. Gate passed on unseen rooms (gap +0.723, 99%
-vs control). See [phase2/README.md](phase2/README.md).**
-Probes 23–28 in [`diagnostics/`](diagnostics/) document the investigation
-that led there. Phase-1 code: [`archive2/`](archive2/).
+**Read this first in any new session.** Then `phase2/README.md` and memory.
 
-# Phase 2 original handoff (2026-08-30)
+## Access / workflow
+- Jump host (CHANGED 08-31): `SSH_AUTH_SOCK= ssh -i ~/.ssh/id_ed25519 -p 22427 zerdani@vulcanix.netsoft.cs.eurecom.fr` then `ssh -i ~/y netsoft@rosebyte`. Pipe scripts via `bash -s` (heredoc file in scratchpad); BatchMode; git = code transport (repo clone at `~/zerdani/buffer/octonet/mixit`), no scp. Long jobs: nohup + marker files in `archive2/` + local background pollers. `OMP_NUM_THREADS=1` for multiproc preps; claim GPU before heavy reads (retry loop). Python: `~/kimodo-env/bin/python` (has h5py, torch cu130; asteroid via `PYTHONPATH=~/zerdani/buffer/octonet/ref_asteroid`).
+- LANDMINE: `pkill -f <pattern>` also kills wrapper bash chains whose cmdline contains the pattern — use `[b]racket` patterns AND never put script names inside waiting-chain command strings.
 
-WiFi CSI sensing on **PerceptAlign**. Written 2026-08-30 for whoever (human or
-model) continues. Phase-1 code lives in `archive2/` here; phase-1 results and
-checkpoints live on the server in `~/zerdani/buffer/octonet/archive2/`.
+## What is PROVEN (phase 2, done)
+- Tokenizer `phase2/tokenize_pa.py`: raw→clean(conj products)→subtract-static/÷|static|→Slepian STFT→per-bin MUSIC→tokens [w,f,φ,ψ,logE]. All 5 scenes cached: `pa_tokens/` (51,927 recs, manifest.csv; imu/=limb GT; pose/=root-rel 15-joint GT scenes1-4; statics/=product statics; statics_add/=ADDITIVE statics; tenv/, static_peaks.npz).
+- Separator gate PASSED: `archive/limbtok12_best_step43k_gate71.pt` (8 slots, identity-free PIT+MixIT): rooms-4/5 matched +0.679, wrong-perm gap +0.723, win 71%, beats dopp-k-means on 99% paired; LW+RW included. Emergent room slot = s3 (probe 30); pose carriers s1/s2 (probe 31).
+- Limb IDENTIFICATION closed (aperture physics, probes 23-26); identity-free clustering works (27/28).
 
-## The validated pipeline (the product of phase 1)
+## Downstream findings (bench/)
+- Pose wall: ~116mm/PCK@50 24 cross-room is INFORMATIONAL (v1=v4=v4b=7.3M=lag-fix all flat). GT-skeleton action ceiling 94%; predicted skeletons only 16-23% (head lossy); tokens direct = best HAR (49.3% in-domain / 22.8% scene4).
+- Statics: raw input = poison (v2 small: heldout 95 but scene4 210; DFR: in features); ComBat/person-tokens/swap all null. **v2-BIG (7.3M, 12h, tokens+raw statics): best heldout 109mm/PCK@20 10.8/PCK@50 36.5 @step100k, scene4 STABLE ~126mm (no poison at scale!), overfit after 100k, stopped.** Ckpt `posetok_v2big_runs/best.pt`. **BATTERY RUNNING on it** → `archive2/log_battery_v2big.txt`, marker `archive2/battery.marker` (part1 pose+collapse-diag, part2 act-from-pose semantics). READ THIS FIRST.
 
-```
-raw CSI (PA, 400 Hz, per receiver, 3 ant, 57→30 subc islands = (T,264))
-  → CLEAN      per-packet AGC norm · Hampel · SFO/PDD island detrend · SNR damping
-  → NORMALIZE  CMN: divide the recording's OWN static out. Room spatial pattern
-               is removed from the signal (not appended — unparrotable). This is
-               calibration, not cheating: single-recording, deployment-honest;
-               but state honestly that STATICS are then assigned by the
-               closed-form reference, not the network (b̄/still-person floor
-               is the disclosed limitation).
-  → STFT       0.64 s windows, ±2–150 Hz micro-Doppler of the modulation
-  → recognize / separate in this basis
-```
+## The TWO-TREATMENT DOCTRINE (night probes 33-39, settled)
+- Dynamics: product clean (differential delay GOOD when differencing mover-vs-room) + STFT/MUSIC tokens. Unchanged.
+- Statics: ADDITIVE clean (`bench/static_additive.py`, all extracted) + ENSEMBLE axis. Facts: person is first-class in the static (receiver-dependent 0-99%); human-free room print exists (split-half 0.84-0.97, probe 37); DC identified by invariance (ψ≈0, rx+room-shared); WALLS unresolvable at 20MHz (structure ψ≤0.065 < Rayleigh 0.11 — closed); NEVER peak-parameterize statics (SR-spectra info-free). Recipe: subtract DC → ensemble room print (label-free site calib) → per-recording residual = person/stance (room-coded: within-site/adaptation only; cross-room only relationally).
 
-## Key results (rooms 4/5 gate = scenes 4+5, never trained on)
+## Next-step queue
+1. Read the battery results (marker above) → decide v2-BIG's role (adaptation-tier base?).
+2. Doctrine build: wire static objects (DC-subtract, room print, person residual) into pipeline; v2-as-per-site-adaptation-tier experiments (shuffle probe, few-shot k-curve).
+3. Tokenizer atoms: K-peak matching pursuit w/ complex amplitudes (reconstruction inside token domain), ridge tokens, slow-band 0.05-2Hz branch.
+4. Environments lever (untouched): PA has 7 device layouts (scene3=A/B/C; repo/ clone + user geometry configs) → 5-7 real static environments; revives GRL/IRM family.
+5. Paper: vs PerceptAlign Table 3 needs absolute frame + geometry (scene2 official cfg frame mismatch w/ our fresh3d labels; scenes1/4 geometry missing). User's actor-campaign folder: ~/Desktop/'New Folder 1' (MVDR isolator best; additivity doctrine origin).
 
-| system | pairSNR | leak | stress |
-|---|---|---|---|
-| **CMN separator** (best learned) | **35.4 dB** | 0.81 | **0.000** |
-| trivial control (site template) | 20.1 | 0.09 | — |
-| closed-form morph deflation | **44.7 dB** | 0.07 | — |
-
-- CMN model = first learned system to beat a control. Checkpoint:
-  `~/zerdani/buffer/octonet/archive2/pa400_cmn_runs/best.pt` (step 10k,
-  cfg in ckpt: M=7, DEG=6, CMN=1, ARCH=conv; eval rebuilds from cfg).
-- Composite architecture = deflation owns statics + CMN model owns dynamics.
-- Limb extraction: closed on current data. Every instrument agrees
-  (energy probes, micro-Doppler probes, per-action classification after
-  motion-matching: wrist-vs-leg fell to ~chance 0.46/0.55; laterality with
-  3-rx features 0.55 = marginal). Revival conditions: data with independent
-  limb episodes, or a coherent 200 Hz aperture (XRF authors' raw — unemailed).
-- Action recognition from these spectra works (0.85 held-out on a
-  high-vs-low-motion pair) → Track 2 is feasible.
-
-## Phase 2 tracks
-
-1. **Separator v2, STFT-native**: masks over time-frequency bins of the CMN
-   modulation (speech-style; time-domain masks cannot split overlapping
-   oscillations). Target ≥ deflation. Gate: rooms 4/5 + controls, always.
-2. **← START HERE. "Beats raw" demonstration**: action recognition, body
-   channel vs raw CSI vs room channel, train scenes 1–3 / test rooms 4/5,
-   clip-level. Needs NO training — the CMN checkpoint produces body channels
-   today. Room-at-chance + body ≥ raw = the flagship claim.
-3. **Deployment packaging**: single receiver, self-calibrating, causal
-   composite; per-site unlabeled fine-tune as optional tier.
-
-## Data & assets on the server (netsoft@rosebyte)
-
-| path (~/zerdani/buffer/octonet/) | contents |
-|---|---|
-| `prep_pa_xrf400/` | PA scene-1 train streams (T,264)@400 Hz + limb GT in imu/ |
-| `prep_pa_xrf400t/` | rooms 4/5 test streams + limb GT (1,200 clips) |
-| `prep_pa_xrf/`, `prep_pa75/`, `prep_v75/`, `prep_xrf/` | 50/75 Hz variants, XRF islands |
-| `archive2/` | all phase-1 logs, markers, run dirs incl. the CMN checkpoint |
-| `archive/` | pre-fine-tune checkpoint copies (standing rule) |
-| `mixit/` | this repo's clone (git is the code transport; no scp) |
-
-Reference implementations to lift from `archive2/` here: `prep/prep_pa_xrf.py`
-(pipeline front end), `eval/eval_xrf.py` (gate incl. CMN + M-slot + limb rows),
-`train/train_xrf.py` (trainer: morph targets, route losses, INIT/GROUPBY/CMN
-flags), `diagnostics/20–22` (STFT probes, per-action machinery).
-
-## Landmines (each cost a run)
-
-- GB10 unified memory: big file sweeps fill page cache → cudaMalloc fails.
-  Claim the GPU **before** heavy reads; keep the retry loop (in train_xrf).
-- Always `OMP_NUM_THREADS=1` for multiprocessing preps (load-110 thrash).
-- Server pulls fail silently if the tree is dirty — never chmod on the
-  server; exec bits belong in git.
-- H5 layouts nest: `samples/<name>/{amp,pha}`, `samples/<name>/imu`.
-- PA `.mat` = HDF5, `csi/csi` (3,57,T) compound + `csi/timestamp` (µs-ish;
-  rate ~860–915 Hz from timestamps; never assume fps).
-- Sensor GTs are only coarsely aligned (±0.5–1 s) — per-recording lag
-  correction via total-motion cross-correlation, one offset per recording.
-- No signal statistics as model INPUTS (hint and self-conditioning both
-  failed by parroting); dividing statistics OUT (CMN) is allowed and works.
-- Time-domain softmax masks can't separate overlapping oscillations (why
-  Track 1 exists). Slot-norm penalty needed for unconstrained slots (Prop 4).
-- Controls (trivial + deflation) before believing any number, always.
-
-## Workflow
-
-SSH: `ssh -i ~/.ssh/id_ed25519 -p 22427 zerdani@csinfra.eurecom.fr` then
-`ssh -i ~/y netsoft@rosebyte` (key lives on jump host; pipe scripts via
-`bash -s` stdin; BatchMode; scope = ~/zerdani/buffer/octonet/ + datasets
-read-only; no deletes). Long jobs: nohup + marker files + local
-run_in_background pollers. Logs stay outside the repo.
+## Rules (standing)
+No statistic INPUTS cross-room (parroting), CMN/fixed-algebra OK. Controls before believing numbers. Same-seed runs = cloned early curves (by design). Checkpoints archived to `~/zerdani/buffer/octonet/archive/`. Phase-1: `archive2/` here; probes 23-39: `diagnostics/`; actor-mixit + teacher-student (written, user-vetoed): `phase3/`.
