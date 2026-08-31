@@ -98,12 +98,57 @@ def run_arm(man, acts, tag):
           f"med|err| {np.median(eb)*60:.0f} bpm  "
           f"card-prominence med {np.median(A[:,2]):.1f}", flush=True)
 
+def detect_arm(man, acts, tag):
+    """detection test: excess PSD at the TRUE HR (best columns), vs the
+    same statistic at other recordings' HRs (null)"""
+    pairs = []
+    sub = man[man.act.isin(acts)].sample(frac=1, random_state=43)
+    for r in sub.itertuples():
+        hr = polar_hr(r)
+        if hr is None: continue
+        f = f"{PREP}/streams/{int(r.rid):06d}.npy"
+        if not os.path.exists(f): continue
+        x = np.load(f).astype(np.float32)
+        rate = float(r.rate)
+        if len(x) < 30 * rate: continue
+        x = (x - x.mean(0)) / (x.std(0) + 1e-6)
+        w = np.hanning(len(x))[:, None].astype(np.float32)
+        X = np.abs(np.fft.rfft(x * w, axis=0)) ** 2       # (F, 228)
+        fr = np.fft.rfftfreq(len(x), 1.0 / rate)
+        cb = (fr >= CB[0]) & (fr <= CB[1])
+        Xc = X[cb] / (np.median(X[cb], 0, keepdims=True) + 1e-12)
+        pairs.append((fr[cb], Xc, hr / 60.0))
+        if len(pairs) >= NRID: break
+    if len(pairs) < 8:
+        print(f"[det {tag}] only {len(pairs)} matched", flush=True)
+        return
+    def score(frv, Xc, f0):
+        m = np.abs(frv - f0) <= 0.06
+        if not m.any(): return np.nan
+        return float(np.sort(Xc[m].max(0))[-5:].mean())   # top-5 columns
+    true_s = [score(f_, X_, h_) for f_, X_, h_ in pairs]
+    null_s = []
+    hrs = [h for _, _, h in pairs]
+    for i, (f_, X_, h_) in enumerate(pairs):
+        for j, h2 in enumerate(hrs):
+            if j != i and abs(h2 - h_) > 0.12:
+                null_s.append(score(f_, X_, h2))
+    true_s = np.array([s for s in true_s if np.isfinite(s)])
+    null_s = np.array([s for s in null_s if np.isfinite(s)])
+    thr = np.percentile(null_s, 95)
+    print(f"[det {tag}] n={len(true_s)}  med excess@HR {np.median(true_s):.2f}"
+          f" vs null {np.median(null_s):.2f}  frac>null95 "
+          f"{np.mean(true_s > thr)*100:.0f}% (chance 5%)", flush=True)
+
 def main():
     man = pd.read_csv(f"{PREP}/meta.csv")
     print("acts available:", {a: int((man.act == a).sum())
                               for a in ACTS + CTRL}, flush=True)
     run_arm(man, ACTS, "STILL " + "+".join(ACTS))
     run_arm(man, CTRL, "MOVING " + "+".join(CTRL))
+    for a in ACTS:
+        detect_arm(man, [a], a)
+    detect_arm(man, CTRL, "moving-ctrl")
 
 if __name__ == "__main__":
     main()
