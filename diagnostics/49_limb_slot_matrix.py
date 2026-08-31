@@ -113,21 +113,31 @@ def main():
             wrong = float(C[rr, c].mean())
         Cn = corrm(Em, np.roll(Gk, nw // 2, 0))
         _, _, null = hung(Cn)
-        res[k].append((matched, wrong, null))
+        # classification view: does each matched slot correlate MOST with
+        # its own limb (chance 1/k)?  and do limbs' greedy best slots
+        # collide?
+        acc = float(np.mean([np.argmax(C[r[i]]) == c[i]
+                             for i in range(k)])) if k > 1 else np.nan
+        greedy = C.argmax(0)                       # best slot per limb
+        nocoll = float(len(set(greedy.tolist())) == k)
+        res[k].append((matched, wrong, null, acc, nocoll))
         slotpick[k].append(len(set(r)))
         if (n_ + 1) % 100 == 0:
             print(f"  {n_+1}/{len(ids)} {(time.time()-t0)/60:.1f}min",
                   flush=True)
 
     print(f"\n=== all-limb Hungarian (ACTTH={ACTTH}, rooms 4/5)", flush=True)
-    print("  k-active   N   matched  wrongperm   null    win", flush=True)
+    print("  k-active   N   matched  wrongperm   null    win   "
+          "cls-acc (chance)  no-collision", flush=True)
     for k in range(1, 6):
         if not res[k]: continue
         a = np.array(res[k], float)
         w = f"{np.nanmedian(a[:,1]):+.3f}" if k > 1 else "   -  "
+        acc = f"{np.nanmean(a[:,3]):.3f} ({1/k:.2f})" if k > 1 else "   -   "
         print(f"     {k}     {len(a):4d}  {np.nanmedian(a[:,0]):+.3f}   "
               f"{w}    {np.nanmedian(a[:,2]):+.3f}  "
-              f"{np.mean(a[:,0] > a[:,2])*100:3.0f}%", flush=True)
+              f"{np.mean(a[:,0] > a[:,2])*100:3.0f}%   {acc}      "
+              f"{np.nanmean(a[:,4]):.2f}", flush=True)
     print("probe 49 done", flush=True)
 
 if __name__ == "__main__":
