@@ -64,12 +64,23 @@ print(f"train {len(tr)} ho {len(ho)} test4 {len(te)}", flush=True)
 
 net = TokCls().to(dev)
 print(f"params {sum(p.numel() for p in net.parameters())/1e6:.1f}M", flush=True)
+# CKF: train-once/eval-many. If the file exists the classifier is LOADED
+# and training is skipped (zero-retraining transfer protocol — the frozen
+# scenes-1-3 model is evaluated on transformed test tokens); otherwise it
+# trains as usual and saves there.
+CKF = os.path.expanduser(os.environ.get("CKF", ""))
+loaded = False
+if CKF and os.path.exists(CKF):
+    net.load_state_dict(torch.load(CKF, map_location=dev,
+                                   weights_only=False)["model"])
+    net.eval(); loaded = True
+    print(f"loaded frozen classifier {CKF} (no training)", flush=True)
 opt = torch.optim.Adam(net.parameters(), lr=LR, weight_decay=1e-5)
 bycls = {}
 for i, it in enumerate(tr): bycls.setdefault(it[1], []).append(i)
 keys = sorted(bycls)
 t0 = time.time()
-for step in range(STEPS):
+for step in range(0 if loaded else STEPS):
     ixb = [bycls[keys[c]][rng.integers(len(bycls[keys[c]]))]
            for c in rng.integers(0, len(keys), B)]
     items = [tr[i] for i in ixb]
@@ -106,6 +117,9 @@ def ev(ds, tag):
     print(f"[{tag}] 17-class {np.mean(P == Y):.3f}  "
           f"merged {np.mean(Pm == Ym):.3f}  (chance 0.059)", flush=True)
     return P, Y
+if CKF and not loaded:
+    torch.save({"model": net.state_dict()}, CKF)
+    print(f"saved classifier -> {CKF}", flush=True)
 ev(ho, "heldout 1-3")
 Pt, Yt = ev(te, "TEST scene4")
 print("\nconfusion (scene 4, rows=true, top-3):")
