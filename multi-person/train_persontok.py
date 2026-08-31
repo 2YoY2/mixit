@@ -42,11 +42,12 @@ TRENVS = set(e for e in os.environ.get(
     "TRENVS", "classroom,meeting_room").split(",") if e)
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(SEED)
+FDIM = 7          # updated by load_items: +3 rx one-hot for v2 tokens
 
 class SetSep(nn.Module):
     def __init__(self):
         super().__init__()
-        self.inp = nn.Linear(7, D)
+        self.inp = nn.Linear(FDIM, D)
         lay = nn.TransformerEncoderLayer(D, 4, 2 * D, batch_first=True,
                                          norm_first=True, dropout=0.0)
         self.enc = nn.TransformerEncoder(lay, NL)
@@ -92,15 +93,21 @@ def load_items():
                   np.sin(t[:, 3]), np.cos(t[:, 3]),
                   t[:, 1] / 150.0, t[:, 0] / max(nw - 1, 1),
                   zle].astype(np.float32)
+        if t.shape[1] >= 6:                     # v2 tokens: rx one-hot
+            hot = np.zeros((len(t), 3), np.float32)
+            hot[np.arange(len(t)), t[:, 5].astype(int)] = 1
+            X = np.c_[X, hot]
         e = (10.0 ** le).astype(np.float32)
         e = np.minimum(e, np.quantile(e, 0.95))
         e = e / (e.mean() + 1e-12)
         items.append(dict(X=X, e=e, n=n, env=r.environment, acts=acts))
+    global FDIM
+    if items: FDIM = items[0]["X"].shape[1]
     return items, vocab
 
 def forward_batch(model, items, ix):
     n = max(len(items[i]["X"]) for i in ix)
-    X = torch.zeros(len(ix), n, 7)
+    X = torch.zeros(len(ix), n, FDIM)
     E = torch.zeros(len(ix), n)
     mask = torch.ones(len(ix), n, dtype=torch.bool)
     for k, i in enumerate(ix):
