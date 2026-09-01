@@ -137,20 +137,58 @@ def main():
                 if np.isfinite(c_) and c_ > best: best = c_
             renv = raw_env(os.path.join(ROOT, r2f[rid]), nw)
             if renv is None: continue
+            # adaptive-k: slots ranked by individual corr (oracle rank);
+            # cumulative union r_k; k* = argmax
+            ems, cs, ens = [], [], []
+            for m in range(M):
+                em = np.zeros(nw)
+                np.add.at(em, widx[hard == m], e[hard == m])
+                ems.append(em); cs.append(corr(em, G))
+                ens.append(em.sum())
+            order = np.argsort(-np.nan_to_num(cs, nan=-2))
+            acc_env = np.zeros(nw)
+            rks = []
+            for m in order:
+                acc_env = acc_env + ems[m]
+                rks.append(corr(acc_env, G))
+            kstar = int(np.nanargmax(rks)) + 1
+            r_adapt = float(np.nanmax(rks))
+            # label-free: loudest slot; and energy-share>=10% union
+            eord = np.argsort(-np.array(ens))
+            r_loud = cs[eord[0]]
+            sh = np.array(ens) / (sum(ens) + 1e-12)
+            un = np.zeros(nw)
+            for m in np.where(sh >= 0.10)[0]:
+                un += ems[m]
+            r_share = corr(un, G)
+            # movement spread: active limbs (>=30% of top limb mean)
+            mug = np.array([np.mean(gi[:, j]) for j in range(5)])
+            kact = int((mug >= 0.3 * mug.max()).sum())
             rows.append((corr(renv, G), corr(ec, G), corr(es, G),
-                         corr(esum, G), best))
+                         corr(esum, G), best, r_adapt, kstar, kact,
+                         r_loud, r_share))
         A = np.array(rows, float)
         A = A[np.isfinite(A).all(1)]
         print(f"\n=== SCENE {scene} (N={len(A)}, "
               f"{(time.time()-t0)/60:.1f}min)", flush=True)
         for i, nm in enumerate(("RAW     ", "CLEAN   ", "NAMED   ",
-                                "SLOT-SUM", "BEST-1  ")):
+                                "SLOT-SUM", "BEST-1  ", "ADAPT-k*",
+                                None, None, "LOUD-1  ", "SHARE10 ")):
+            if nm is None: continue
             print(f"  {nm}: median r {np.median(A[:, i]):+.3f}  "
                   f"mean {A[:, i].mean():+.3f}", flush=True)
         print(f"  paired: CLEAN>RAW {np.mean(A[:,1]>A[:,0])*100:.0f}%  "
-              f"SLOTSUM>CLEAN {np.mean(A[:,3]>A[:,1])*100:.0f}%  "
               f"BEST1>CLEAN {np.mean(A[:,4]>A[:,1])*100:.0f}%  "
-              f"NAMED>CLEAN {np.mean(A[:,2]>A[:,1])*100:.0f}%", flush=True)
+              f"ADAPT>BEST1 {np.mean(A[:,5]>A[:,4])*100:.0f}%  "
+              f"LOUD1>CLEAN {np.mean(A[:,8]>A[:,1])*100:.0f}%", flush=True)
+        from scipy.stats import spearmanr
+        print(f"  k*: mean {A[:,6].mean():.2f}; Spearman(k*, active-limbs) "
+              f"{spearmanr(A[:,6], A[:,7]).statistic:+.3f}", flush=True)
+        for ka in range(1, 6):
+            m_ = A[:, 7] == ka
+            if m_.sum() < 10: continue
+            print(f"    active-limbs={ka}: mean k* {A[m_,6].mean():.2f} "
+                  f"(N={int(m_.sum())})", flush=True)
     print("probe 51 done", flush=True)
 
 if __name__ == "__main__":
