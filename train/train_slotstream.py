@@ -40,6 +40,7 @@ B = int(os.environ.get("B", "24"))
 LR = float(os.environ.get("LR", "5e-4"))
 DE = int(os.environ.get("DE", "64"))
 VELW = float(os.environ.get("VELW", "2"))
+MOTW = float(os.environ.get("MOTW", "0"))   # motion-weighted L1
 SEED = int(os.environ.get("SEED", "0"))
 NJ, ROOTJ = 15, 8
 NS, NFIN = 24, 19
@@ -278,9 +279,20 @@ def main():
         pred, anc = net(S)
         msk = torch.isfinite(Y).all(-1, keepdim=True)
         Yn = torch.nan_to_num(Y)
-        loss = (torch.where(msk, (pred - Yn).abs(),
-                            torch.zeros_like(pred)).sum()
-                / msk.sum().clamp(min=1) / 3)
+        if MOTW > 0:
+            # weight residuals by GT speed: freezing stops being profitable
+            spd = torch.zeros_like(Yn[..., 0])
+            spd[:, 1:] = (Yn[:, 1:] - Yn[:, :-1]).norm(dim=-1)
+            spd[:, 0] = spd[:, 1]
+            mspd = (spd * msk[..., 0]).sum((1, 2), keepdim=True)                 / msk[..., 0].sum((1, 2), keepdim=True).clamp(min=1)
+            wgt = (0.2 + MOTW * spd / mspd.clamp(min=1e-6))[..., None]
+            loss = (torch.where(msk, wgt * (pred - Yn).abs(),
+                                torch.zeros_like(pred)).sum()
+                    / (wgt * msk).sum().clamp(min=1) / 3)
+        else:
+            loss = (torch.where(msk, (pred - Yn).abs(),
+                                torch.zeros_like(pred)).sum()
+                    / msk.sum().clamp(min=1) / 3)
         rmsk = msk[:, :, ROOTJ]
         loss = loss + 0.5 * (torch.where(
             rmsk, (anc - Yn[:, :, ROOTJ]).abs(),
