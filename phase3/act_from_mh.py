@@ -50,7 +50,28 @@ print(f"MH model {CK} step {ck.get('step')} K={K}", flush=True)
 # mu/sd from the training-split recipe (needed to de-normalize hypotheses)
 # MUSC must match the scenes the pose ckpt was TRAINED on (s1-model: MUSC=1)
 MUSC = [int(v) for v in os.environ.get("MUSC", "1,2,3").split(",")]
-_tr_all = ptk.build(MUSC)
+LIMBSEL = os.environ.get("LIMBSEL", "")
+_smap = None
+def _limbsel(items):
+    """same filter as train_posetok_mh: predominant-limb slot tokens only."""
+    global _smap
+    if not LIMBSEL: return items
+    if _smap is None:
+        z = np.load(os.path.expanduser(LIMBSEL))
+        _smap = {int(r): int(m) for r, m in zip(z["rids"], z["mask"])}
+    out = []
+    for it in items:
+        tok = it[0]
+        rx = tok[:, 15:18].astype(np.float32).argmax(1)
+        sl = tok[:, 7:15].astype(np.float32).argmax(1)
+        keep = np.zeros(len(tok), bool)
+        for i_ in range(3):
+            m_ = _smap.get(int(it[3][i_]), 0)
+            keep |= (rx == i_) & (np.right_shift(m_, sl) & 1 > 0)
+        if keep.sum() < 16: continue
+        out.append((tok[keep],) + tuple(it[1:]))
+    return out
+_tr_all = _limbsel(ptk.build(MUSC))
 _rng = np.random.default_rng(ptk.SEED)
 _ix = _rng.permutation(len(_tr_all))
 _tr = [_tr_all[i] for i in _ix[:int(len(_ix) * 0.95)]]
@@ -65,7 +86,7 @@ RID2ACT = {int(r.rid): int(r.act) for r in man.itertuples()}
 RID2SC = {int(r.rid): int(r.scene) for r in man.itertuples()}
 
 def pose_sets(scenes):
-    ds = _tr_all if scenes == MUSC else ptk.build(scenes)
+    ds = _tr_all if scenes == MUSC else _limbsel(ptk.build(scenes))
     out = []
     with torch.no_grad():
         for it in ds:
