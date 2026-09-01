@@ -44,20 +44,38 @@ ck = torch.load(CK, map_location=dev, weights_only=False)
 net.load_state_dict(ck["model"]); net.eval()
 print(f"MH model {CK} step {ck.get('step')}", flush=True)
 
-items = ptk.build([1, 2, 3]) if SC in (1, 2, 3) else ptk.build([SC])
+man = pd.read_csv(f"{ptk.TOK}/manifest.csv")
+# mu/sd from a light sample of train-scene pose files (no full build)
 rng = np.random.default_rng(0)
-ix = rng.permutation(len(items))
-tr = [items[i] for i in ix[:int(len(ix) * 0.95)]]
+tr_rids = rng.permutation(np.array(
+    man[man.scene.isin([1, 2, 3])].rid.values))[:600]
+ps = []
+for rid in tr_rids:
+    f = f"{ptk.TOK}/pose/{int(rid):06d}.npy"
+    if os.path.exists(f):
+        ps.append(np.asarray(np.load(f), np.float32))
 mu = np.zeros((NJ, 3)); sd = np.ones((NJ, 3))
 for j in range(NJ):
-    vs = np.concatenate([it[1][:, j][np.isfinite(it[1][:, j]).all(-1)]
-                         for it in tr if np.isfinite(it[1][:, j]).any()])
+    vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
+                         for P in ps if np.isfinite(P[:, j]).any()])
     if len(vs): mu[j] = vs.mean(0); sd[j] = vs.std(0) + 1e-3
 
-man = pd.read_csv(f"{ptk.TOK}/manifest.csv")
-R2A = {int(r.rid): int(r.act) for r in man.itertuples()}
-R2S = {int(r.rid): int(r.scene) for r in man.itertuples()}
-ho = [items[i] for i in ix[int(len(ix) * 0.95):]]     # heldout clips only
+def one_clip(act):
+    ms = man[(man.scene == SC) & (man.act == act)].copy()
+    ms["ckey"] = ms["name"].str.replace(r"_r\d$", "", regex=True)
+    for _, g in ms.groupby("ckey"):
+        if len(g) != 3: continue
+        rids = [int(r) for r in g.sort_values("node").rid.values]
+        ts = [ptk.rec_tok(r, i) for i, r in enumerate(rids)]
+        if any(t is None for t in ts): continue
+        nw = min(t[2] for t in ts)
+        tok = np.concatenate([t[0] for t in ts], 0)
+        pf = f"{ptk.TOK}/pose/{rids[0]:06d}.npy"
+        if not os.path.exists(pf): continue
+        P = np.asarray(np.load(pf), np.float32)[:nw]
+        if not np.isfinite(P).any(): continue
+        return tok, P, nw, rids
+    return None
 
 def render(P, Q, title, path):
     """P GT (T,15,3), Q pred (T,15,3) -> side-by-side gif."""
@@ -93,11 +111,9 @@ done = []
 with torch.no_grad():
     for act in ACTS:
         got = False
-        for it in ho:
-            rid = int(it[3][0])
-            if R2A.get(rid) != act or R2S.get(rid) != SC: continue
-            tok, P, nw, rids = it[0], it[1], it[2], it[3]
-            if not np.isfinite(P).any(): continue
+        clip = one_clip(act)
+        if clip is not None:
+            tok, P, nw, rids = clip
             X = torch.from_numpy(np.asarray(tok, np.float32))[None].to(dev)
             mask = torch.zeros(1, len(tok), dtype=torch.bool, device=dev)
             st = torch.from_numpy(ptk.get_static(rids))[None].to(dev) \
