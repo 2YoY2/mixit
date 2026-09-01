@@ -131,12 +131,11 @@ with torch.no_grad():
             if render(P, hyps[:, kbest],
                       f"{nm} (scene {SC}, MPJPE "
                       f"{errs[kbest]*1000:.0f}mm)", path):
-                print(f"  {nm}: rid {rid} oracle-hyp {kbest} "
+                print(f"  {nm}: rid {rids[0]} oracle-hyp {kbest} "
                       f"mpjpe {errs[kbest]*1000:.0f}mm -> {path}",
                       flush=True)
                 done.append(path)
                 got = True
-                break
         if not got:
-            print(f"  act {act}: no heldout clip found", flush=True)
+            print(f"  act {act}: no clip rendered", flush=True)
 print(f"rendered {len(done)} gifs", flush=True)
