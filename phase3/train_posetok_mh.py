@@ -143,6 +143,27 @@ def main():
           f"SOFTPCK={SOFTPCK} L1W={L1W} TAU={TAU}", flush=True)
     tr_all = ptk.build(TRSC)
     te = ptk.build(TESC)
+    LIMBSEL = os.environ.get("LIMBSEL", "")
+    if LIMBSEL:
+        z = np.load(os.path.expanduser(LIMBSEL))
+        smap = {int(r): int(m) for r, m in zip(z["rids"], z["mask"])}
+        def _filt(items):
+            out = []
+            for it in items:
+                tok = it[0]
+                rx = tok[:, 15:18].astype(np.float32).argmax(1)
+                sl = tok[:, 7:15].astype(np.float32).argmax(1)
+                keep = np.zeros(len(tok), bool)
+                for i_ in range(3):
+                    m_ = smap.get(int(it[3][i_]), 0)
+                    keep |= (rx == i_) & (np.right_shift(m_, sl) & 1 > 0)
+                if keep.sum() < 16: continue
+                out.append((tok[keep],) + tuple(it[1:]))
+            return out
+        a0, b0 = len(tr_all), len(te)
+        tr_all = _filt(tr_all); te = _filt(te)
+        print(f"LIMBSEL: predominant-limb slot tokens only — train "
+              f"{a0}->{len(tr_all)}, test {b0}->{len(te)}", flush=True)
     rng = np.random.default_rng(ptk.SEED)
     ix = rng.permutation(len(tr_all))
     ho = [tr_all[i] for i in ix[int(len(ix) * 0.95):]]
