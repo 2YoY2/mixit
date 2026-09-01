@@ -28,6 +28,8 @@ WINF = int(os.environ.get("WINF", "256"))
 HOPF = int(os.environ.get("HOPF", "32"))
 NPROC = int(os.environ.get("NPROC", "8"))
 VALIDATE = int(os.environ.get("VALIDATE", "0"))
+ABSROOT = int(os.environ.get("ABSROOT", "0"))
+SCENES = [int(v) for v in os.environ.get("SCENES", "").split(",") if v]
 NVAL = int(os.environ.get("NVAL", "12"))
 FS, NJ, ROOTJ = 400.0, 15, 8
 
@@ -51,7 +53,7 @@ def grid_pose(P, nw, winf, hopf):
     """window-center linear interp of the root-relative 15-joint track"""
     nsamp = (nw - 1) * hopf + winf
     fps = len(P) / (nsamp / FS)
-    R = P - P[:, ROOTJ:ROOTJ + 1]
+    R = P if ABSROOT else P - P[:, ROOTJ:ROOTJ + 1]
     tc = (np.arange(nw) * hopf + winf / 2) / FS          # window centers (s)
     fi = tc * fps - 0.5                                  # frame coordinate
     f0 = np.clip(np.floor(fi).astype(int), 0, len(P) - 1)
@@ -113,6 +115,7 @@ def main():
         validate(); return
     os.makedirs(f"{TOKDIR}/pose", exist_ok=True)
     man = pd.read_csv(f"{TOKDIR}/manifest.csv")
+    if SCENES: man = man[man.scene.isin(SCENES)]
     man["kd"] = man.file.map(lambda f: os.path.join(
         ROOT, os.path.dirname(os.path.dirname(f)), "fresh3d/keypoints3d"))
     groups = [(kd, [int(r) for r in g.rid.values])
