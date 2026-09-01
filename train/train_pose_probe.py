@@ -29,6 +29,7 @@ B = int(os.environ.get("B", "32"))
 LR = float(os.environ.get("LR", "1e-3"))
 H = int(os.environ.get("H", "256"))
 SEED = int(os.environ.get("SEED", "0"))
+VELW = float(os.environ.get("VELW", "0"))
 ARMS = os.environ.get("ARMS", "model,raw").split(",")
 DIAG = int(os.environ.get("DIAG", "0"))
 NJ = 15
@@ -152,9 +153,18 @@ def run_arm(name, ai, tr, ho, te, mu):
         pred = head(X)
         msk = torch.isfinite(Y).all(-1, keepdim=True)
         msk[:, :, 8] = False
-        loss = (torch.where(msk, (pred - torch.nan_to_num(Y)).abs(),
+        Yn = torch.nan_to_num(Y)
+        loss = (torch.where(msk, (pred - Yn).abs(),
                             torch.zeros_like(pred)).sum()
                 / msk.sum().clamp(min=1) / 3)
+        if VELW > 0:
+            # anti-static: predicted frame-to-frame motion must match GT's
+            mv = msk[:, 1:] & msk[:, :-1]
+            dp = pred[:, 1:] - pred[:, :-1]
+            dg = Yn[:, 1:] - Yn[:, :-1]
+            loss = loss + VELW * (torch.where(mv, (dp - dg).abs(),
+                                              torch.zeros_like(dp)).sum()
+                                  / mv.sum().clamp(min=1) / 3)
         opt.zero_grad(); loss.backward(); opt.step()
         if step % 500 == 0:
             print(f"  [{name} {step}] L1 {loss.item()*100:.2f} cm", flush=True)
