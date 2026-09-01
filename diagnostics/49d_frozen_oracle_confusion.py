@@ -67,7 +67,7 @@ def corr(a, b):
     return float(np.corrcoef(a, b)[0, 1])
 
 def oracle_mask(rid, X, nw):
-    """-> bool mask over X's tokens: argmax slot in the oracle limb set."""
+    """-> (limb-oracle mask, ADAPT-k* mask) over X's tokens."""
     gf = f"{TOK}/imu/{rid:06d}.npy"
     if not os.path.exists(gf): return None
     z = np.load(f"{TOK}/tokens/{rid:06d}.npz")
@@ -89,6 +89,7 @@ def oracle_mask(rid, X, nw):
     mu = G.mean(0)
     act = np.where(mu >= ACTTH * mu.max())[0]
     if len(act) < 1: return None
+    hard = a.argmax(1)
     Em = np.zeros((M, nw))
     for m in range(M):
         np.add.at(Em[m], w, a[:, m] * e)
@@ -97,7 +98,24 @@ def oracle_mask(rid, X, nw):
         for j, lj in enumerate(act):
             C[m, j] = corr(Em[m, :nww], G[:, lj])
     r, _ = linear_sum_assignment(-C)
-    return np.isin(a.argmax(1), r)
+    # ADAPT-k*: rank slots by corr with TOTAL motion (unresidualized),
+    # keep the cumulative-union prefix that maximizes correlation
+    Gt = np.array([gi.sum(1)[wi * HOPF:wi * HOPF + WINF].mean()
+                   for wi in range(nww)])
+    ems, cs = [], []
+    for m in range(M):
+        em = np.zeros(nw)
+        np.add.at(em, w[hard == m], e[hard == m])
+        ems.append(em); cs.append(corr(em[:nww], Gt))
+    order = np.argsort(-np.nan_to_num(cs, nan=-2))
+    accv = np.zeros(nw)
+    rks = []
+    for m in order:
+        accv = accv + ems[m]
+        rks.append(corr(accv[:nww], Gt))
+    kstar = int(np.nanargmax(rks)) + 1
+    keepset = set(int(m) for m in order[:kstar])
+    return np.isin(hard, r), np.isin(hard, list(keepset))
 
 def classify(items):
     P = []
@@ -128,7 +146,7 @@ def main():
         groups = [g for _, g in ms.groupby("ckey")
                   if len(g) == 3 and set(g.node) == {"r1", "r2", "r3"}]
         rng.shuffle(groups)
-        arms = {"ALL": [], "ORACLE": [], "COMPL": []}
+        arms = {"ALL": [], "ORACLE": [], "COMPL": [], "ADAPTK": []}
         Y = []
         t0 = time.time()
         for g in groups:
@@ -136,36 +154,40 @@ def main():
             rids = [int(r) for r in g.sort_values("node").rid.values]
             al = r2a.get(rids[0])
             if al is None: continue
-            xs, os_, cs = [], [], []
+            xs, os_, cs, ad = [], [], [], []
             ok = True
             for i, rid in enumerate(rids):
                 res = ptk.rec_tok(rid, i)
                 if res is None: ok = False; break
                 X, _, nw = res
                 X = np.asarray(X, np.float32)
-                mo = oracle_mask(rid, X, nw)
-                if mo is None or mo.sum() < 8 or (~mo).sum() < 8:
+                masks = oracle_mask(rid, X, nw)
+                if masks is None: ok = False; break
+                mo, ma = masks
+                if mo.sum() < 8 or (~mo).sum() < 8 or ma.sum() < 8:
                     ok = False; break
                 xs.append(X); os_.append(X[mo]); cs.append(X[~mo])
+                ad.append(X[ma])
             if not ok: continue
             arms["ALL"].append(cap(np.concatenate(xs)))
             arms["ORACLE"].append(cap(np.concatenate(os_)))
             arms["COMPL"].append(cap(np.concatenate(cs)))
+            arms["ADAPTK"].append(cap(np.concatenate(ad)))
             Y.append(al - 1)
         Y = np.array(Y)
         print(f"\n===== SCENE {scene}: {len(Y)} clips "
               f"({(time.time()-t0)/60:.1f}min harvest)", flush=True)
         preds = {}
-        for arm in ("ALL", "ORACLE", "COMPL"):
+        for arm in ("ALL", "ORACLE", "ADAPTK", "COMPL"):
             P = classify(arms[arm])
             preds[arm] = P
             Pm = np.array([MIRROR.get(v + 1, v + 1) for v in P])
             Ym = np.array([MIRROR.get(v + 1, v + 1) for v in Y])
             print(f"  [{arm:6s}] 17-class {np.mean(P == Y):.3f}  merged "
                   f"{np.mean(Pm == Ym):.3f}  (chance 0.059)", flush=True)
-        print(f"\n  confusion SCENE {scene} (ORACLE arm, rows=true, top-3):",
+        print(f"\n  confusion SCENE {scene} (ADAPTK arm, rows=true, top-3):",
               flush=True)
-        P = preds["ORACLE"]
+        P = preds["ADAPTK"]
         for k in range(NC):
             m = Y == k
             if not m.any(): continue
