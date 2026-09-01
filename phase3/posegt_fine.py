@@ -53,7 +53,13 @@ def grid_pose(P, nw, winf, hopf):
     """window-center linear interp of the root-relative 15-joint track"""
     nsamp = (nw - 1) * hopf + winf
     fps = len(P) / (nsamp / FS)
-    R = P if ABSROOT else P - P[:, ROOTJ:ROOTJ + 1]
+    if ABSROOT == 2:                     # clip-centered: keep motion,
+        c = np.nanmean(P[:, ROOTJ], 0)   # drop room position
+        R = P - c[None, None]
+    elif ABSROOT == 1:
+        R = P
+    else:
+        R = P - P[:, ROOTJ:ROOTJ + 1]
     tc = (np.arange(nw) * hopf + winf / 2) / FS          # window centers (s)
     fi = tc * fps - 0.5                                  # frame coordinate
     f0 = np.clip(np.floor(fi).astype(int), 0, len(P) - 1)
