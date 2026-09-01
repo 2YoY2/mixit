@@ -126,8 +126,13 @@ with torch.no_grad():
                 d = np.linalg.norm(hyps[:, k_] - P, axis=-1)
                 errs.append(np.nanmean(d))
             kbest = int(np.nanargmin(errs))
+            if os.environ.get("HYPMODE", "") == "motion":
+                stds = [np.nanmean(np.nanstd(hyps[:, k_], 0))
+                        for k_ in range(K)]
+                kbest = int(np.nanargmax(stds))
             nm = ANAMES.get(act, f"act{act}")
-            path = f"{OUTD}/skel_{nm}.gif"
+            sfx = "_motion" if os.environ.get("HYPMODE", "") else ""
+            path = f"{OUTD}/skel_{nm}{sfx}.gif"
             if render(P, hyps[:, kbest],
                       f"{nm} (scene {SC}, MPJPE "
                       f"{errs[kbest]*1000:.0f}mm)", path):
