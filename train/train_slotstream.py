@@ -151,7 +151,7 @@ def residual_limbs(gi, nw):
     return np.stack([g2[w * HOPF:w * HOPF + WINF].mean(0)
                      for w in range(nw)])
 
-def build(scene):
+def build(scene, with_act=False):
     man = pd.read_csv(f"{TOK}/manifest.csv")
     man = man[man.scene == scene].copy()
     man["ckl"] = man["name"].str.replace(r"_r\d$", "", regex=True)
@@ -174,8 +174,9 @@ def build(scene):
             fs.append(F)
         if len(fs) != 3: continue
         nw = min(min(f.shape[1] for f in fs), len(P))
-        out.append((np.concatenate([f[:, :nw] for f in fs], 0
-                                   ).astype(np.float16), P[:nw]))
+        item = (np.concatenate([f[:, :nw] for f in fs], 0
+                                ).astype(np.float16), P[:nw])
+        out.append(item + (int(g.act.values[0]),) if with_act else item)
         if len(out) % 500 == 0: print(f"  s{scene}: {len(out)}", flush=True)
     return out
 
