@@ -22,6 +22,8 @@ OUTF = os.path.expanduser(os.environ.get(
     "OUTF", "~/zerdani/buffer/octonet/limbsel_slots.npz"))
 CMIN = float(os.environ.get("CMIN", "0.2"))
 MARG = float(os.environ.get("MARG", "0.1"))
+SELMODE = os.environ.get("SELMODE", "limb")
+GAIN = float(os.environ.get("GAIN", "0.01"))
 HOPF, WINF = 128, 256
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -80,11 +82,33 @@ def main():
         for m in range(M):
             np.add.at(Em[m], widx, a[:, m] * e)
         msk = 0
-        for m in range(M):
-            cs = np.array([corr(Em[m], G[:, j]) for j in range(5)])
-            o = np.argsort(-cs)
-            if cs[o[0]] >= CMIN and cs[o[0]] - cs[o[1]] >= MARG:
-                msk |= (1 << m)
+        if SELMODE == "explain":
+            # greedy forward selection: slot admitted only if it adds
+            # >= GAIN explained variance of the 5 raw limb envelopes
+            Yt = np.stack([[gi[:, j][wi * HOPF:wi * HOPF + WINF].mean()
+                            for wi in range(len(G))] for j in range(5)], 1)
+            Emat = Em[:, :len(G)].T
+            sst = ((Yt - Yt.mean(0)) ** 2).sum()
+            chosen, r2 = [], 0.0
+            for _ in range(M):
+                bg, bm, br = 0.0, None, r2
+                for m in range(M):
+                    if m in chosen: continue
+                    A2 = np.c_[Emat[:, chosen + [m]], np.ones(len(Yt))]
+                    beta2, *_ = np.linalg.lstsq(A2, Yt, rcond=None)
+                    r2n = 1 - ((Yt - A2 @ beta2) ** 2).sum() / max(sst, 1e-12)
+                    if r2n - r2 > bg: bg, bm, br = r2n - r2, m, r2n
+                if bm is None or bg < GAIN: break
+                chosen.append(bm); r2 = br
+            if not chosen:
+                chosen = [int(np.argmax(Em.sum(1)))]
+            for m in chosen: msk |= (1 << m)
+        else:
+            for m in range(M):
+                cs = np.array([corr(Em[m], G[:, j]) for j in range(5)])
+                o = np.argsort(-cs)
+                if cs[o[0]] >= CMIN and cs[o[0]] - cs[o[1]] >= MARG:
+                    msk |= (1 << m)
         rids_out.append(rid); mask_out.append(msk)
         if (n_ + 1) % 5000 == 0:
             print(f"  {n_+1}/{len(man)} named={len(rids_out)} "
