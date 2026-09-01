@@ -105,7 +105,8 @@ def build(scene):
         P = np.asarray(np.load(pf), np.float32)[:nw]
         if not np.isfinite(P).any(): continue
         out.append((np.concatenate([f[0][:nw] for f in fs], 1),
-                    np.concatenate([f[1][:nw] for f in fs], 1), P))
+                    np.concatenate([f[1][:nw] for f in fs], 1), P,
+                    int(g.act.values[0])))
         if len(out) % 500 == 0: print(f"  scene{scene}: {len(out)}", flush=True)
     return out
 
@@ -124,6 +125,13 @@ def mpjpe(pred, gt):
     if not m.any(): return np.nan
     d = np.linalg.norm(np.nan_to_num(pred - gt), axis=-1)
     return float(d[m].mean() * 100)
+
+def pck2(pred, gt):
+    m = np.isfinite(gt).all(-1)
+    m[:, 8] = False
+    if not m.any(): return np.nan, np.nan
+    d = np.linalg.norm(np.nan_to_num(pred - gt), axis=-1)[m]
+    return float((d < 0.02).mean() * 100), float((d < 0.05).mean() * 100)
 
 def run_arm(name, ai, tr, ho, te, mu):
     fin = tr[0][ai].shape[1]
@@ -151,18 +159,24 @@ def run_arm(name, ai, tr, ho, te, mu):
         if step % 500 == 0:
             print(f"  [{name} {step}] L1 {loss.item()*100:.2f} cm", flush=True)
     def ev(ds):
-        errs = []
+        errs, p20, p50 = [], [], []
         with torch.no_grad():
-            for F_, R_, P in ds:
+            for F_, R_, P, _a in ds:
                 F = F_ if ai == 0 else R_
                 pr = head(torch.from_numpy(F)[None].to(dev))[0].cpu().numpy()
                 errs.append(mpjpe(pr, P))
-        return float(np.nanmedian(errs))
+                a_, b_ = pck2(pr, P)
+                p20.append(a_); p50.append(b_)
+        return (float(np.nanmedian(errs)), float(np.nanmean(p20)),
+                float(np.nanmean(p50)))
+    os.makedirs(OUTD, exist_ok=True)
+    torch.save({"model": head.state_dict(), "fin": fin, "arm": name},
+               f"{OUTD}/{name}.pt")
     if DIAG:
         JS = [j for j in range(NJ) if j != 8]
         dm, sp, sg, tc, wins = [], [], [], [], []
         with torch.no_grad():
-            for F_, R_, P in te:
+            for F_, R_, P, _a in te:
                 F = F_ if ai == 0 else R_
                 pr = head(torch.from_numpy(F)[None].to(dev))[0].cpu().numpy()
                 m = np.isfinite(P).all(-1); m[:, 8] = False
@@ -198,20 +212,76 @@ print(f"scene1 train {len(tr)} / heldout {len(ho)} | scene4 test {len(te)}",
 mu = np.zeros((NJ, 3))
 for j in range(NJ):
     vs = np.concatenate([P[:, j][np.isfinite(P[:, j]).all(-1)]
-                         for _, _, P in tr if np.isfinite(P[:, j]).any()])
+                         for _, _, P, _ in tr if np.isfinite(P[:, j]).any()])
     mu[j] = vs.mean(0) if len(vs) else 0
 base_ho = float(np.nanmedian([mpjpe(np.broadcast_to(mu, P.shape), P)
-                           for _, _, P in ho]))
+                           for _, _, P, _ in ho]))
 base_te = float(np.nanmedian([mpjpe(np.broadcast_to(mu, P.shape), P)
-                           for _, _, P in te]))
+                           for _, _, P, _ in te]))
 print(f"\nmean-pose baseline: scene1-ho {base_ho:.1f} cm | scene4 {base_te:.1f} cm",
       flush=True)
 for name, ai in (("model", 0), ("raw", 1)):
     if name not in ARMS: continue
-    h, t = run_arm(name, ai, tr, ho, te, mu)
-    print(f"[{name:5s}] MPJPE scene1-ho {h:.1f} cm | scene4 {t:.1f} cm", flush=True)
+    (h, h20, h50), (t, t20, t50) = run_arm(name, ai, tr, ho, te, mu)
+    print(f"[{name:5s}] ho: MPJPE {h:.1f} cm PCK@20 {h20:.1f} PCK@50 {h50:.1f}"
+          f" | scene4: MPJPE {t:.1f} cm PCK@20 {t20:.1f} PCK@50 {t50:.1f}",
+          flush=True)
 print("""
 READ: model < raw < baseline on scene 4 = the separator's output transfers
 pose information to an unseen room better than raw Doppler statistics --
 the output is (that much) universal. model ~ baseline = motion features
 alone don't carry posture; expected partial ceiling, see caveat in report.""")
+
+
+RENDER_ACTS = [int(v) for v in os.environ.get("RENDER_ACTS", "").split(",")
+               if v]
+if RENDER_ACTS and os.path.exists(f"{OUTD}/model.pt"):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    ANAMES = {15: "squat", 14: "jumpjack", 13: "ccw-spin", 11: "pick-up"}
+    EDGES = [(0, 1), (1, 2), (2, 3), (3, 4), (1, 5), (5, 6), (6, 7), (1, 8),
+             (8, 9), (9, 10), (10, 11), (8, 12), (12, 13), (13, 14)]
+    ckm = torch.load(f"{OUTD}/model.pt", map_location=dev, weights_only=False)
+    hd = Head(ckm["fin"]).to(dev)
+    hd.load_state_dict(ckm["model"]); hd.eval()
+    GIFD = os.path.expanduser("~/zerdani/buffer/cluster/logs")
+    for pool, tag in ((ho, "ho"), (te, f"s{TESC}")):
+        for act in RENDER_ACTS:
+            clip = next((it for it in pool if it[3] == act), None)
+            if clip is None: continue
+            F, _, P, _ = clip
+            with torch.no_grad():
+                pr = hd(torch.from_numpy(F)[None].to(dev))[0].cpu().numpy()
+            fin_ = np.isfinite(P).all((1, 2))
+            Pg, Qg = P[fin_], pr[fin_]
+            if len(Pg) < 8: continue
+            var = np.nanvar(Pg.reshape(-1, 3), 0)
+            a0, a1 = np.argsort(-var)[:2]
+            lo = np.nanpercentile(Pg.reshape(-1, 3), 2, 0) - 0.15
+            hi = np.nanpercentile(Pg.reshape(-1, 3), 98, 0) + 0.15
+            fig, axes = plt.subplots(1, 2, figsize=(6.4, 3.6))
+            nm = ANAMES.get(act, f"act{act}")
+            fig.suptitle(f"{nm} [{tag}] slot-output model, moving GT "
+                         f"(MPJPE {mpjpe(pr, P):.0f}cm)")
+            arts = []
+            for ax, t_, c_ in ((axes[0], "ground truth", "tab:green"),
+                               (axes[1], "prediction", "tab:red")):
+                ax.set_xlim(lo[a0], hi[a0]); ax.set_ylim(lo[a1], hi[a1])
+                ax.set_aspect("equal")
+                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_title(t_, fontsize=9)
+                arts.append([ax.plot([], [], "-o", color=c_, ms=2,
+                                     lw=1.5)[0] for _ in EDGES])
+            def fr(t2):
+                for S, ls in ((Pg[t2], arts[0]), (Qg[t2], arts[1])):
+                    for (e0, e1), ln in zip(EDGES, ls):
+                        ln.set_data([S[e0, a0], S[e1, a0]],
+                                    [S[e0, a1], S[e1, a1]])
+                return [l for ls in arts for l in ls]
+            ani = FuncAnimation(fig, fr, frames=len(Pg), blit=True)
+            ani.save(f"{GIFD}/skelabs_{nm}_{tag}.gif",
+                     writer=PillowWriter(fps=6))
+            plt.close(fig)
+            print(f"gif: {nm} {tag}", flush=True)
