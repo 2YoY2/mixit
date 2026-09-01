@@ -170,8 +170,8 @@ def build(scene):
         for i, r in enumerate(rids):
             F = rec_streams(r, root, G)
             if F is None: break
-            hot = np.zeros((M, F.shape[1], 3), np.float32); hot[:, :, i] = 1
-            fs.append(np.concatenate([F, hot], 2))
+            F[:, :, 16 + i] = 1.0                # rx one-hot (reserved cols)
+            fs.append(F)
         if len(fs) != 3: continue
         nw = min(min(f.shape[1] for f in fs), len(P))
         out.append((np.concatenate([f[:, :nw] for f in fs], 0
