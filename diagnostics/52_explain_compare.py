@@ -26,7 +26,8 @@ ROOT = os.path.expanduser(os.environ.get(
 RUNS = os.path.expanduser(os.environ.get(
     "MIXIT_RUNS", "~/zerdani/buffer/octonet/limbtok12_runs"))
 N = int(os.environ.get("N", "200"))
-FS, WINF, HOPF = 400.0, 256, 128
+FS, WINF = 400.0, 256
+HOPF = int(os.environ.get("HOPF", "128"))
 NB8 = 8
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 
