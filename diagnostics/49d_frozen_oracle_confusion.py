@@ -115,7 +115,27 @@ def oracle_mask(rid, X, nw):
         rks.append(corr(accv[:nww], Gt))
     kstar = int(np.nanargmax(rks)) + 1
     keepset = set(int(m) for m in order[:kstar])
-    return np.isin(hard, r), np.isin(hard, list(keepset))
+    # EXPLAIN-k: greedy forward selection maximizing multivariate R^2 of
+    # the 5 limb envelopes from slot envelopes -- a slot earns its place
+    # only by explaining variance the chosen ones cannot
+    Yt = np.stack([[gi[:, j][wi * HOPF:wi * HOPF + WINF].mean()
+                    for wi in range(nww)] for j in range(5)], 1)
+    Emat = np.stack([em[:nww] for em in ems], 1)
+    sst = ((Yt - Yt.mean(0)) ** 2).sum()
+    chosen, r2 = [], 0.0
+    for _ in range(M):
+        bg, bm, br = 0.0, None, r2
+        for m in range(M):
+            if m in chosen: continue
+            A2 = np.c_[Emat[:, chosen + [m]], np.ones(nww)]
+            beta, *_ = np.linalg.lstsq(A2, Yt, rcond=None)
+            r2n = 1 - ((Yt - A2 @ beta) ** 2).sum() / max(sst, 1e-12)
+            if r2n - r2 > bg: bg, bm, br = r2n - r2, m, r2n
+        if bm is None or bg < 0.01: break
+        chosen.append(bm); r2 = br
+    if not chosen: chosen = [int(order[0])]
+    return (np.isin(hard, r), np.isin(hard, list(keepset)),
+            np.isin(hard, chosen), r2, len(chosen))
 
 def classify(items):
     P = []
@@ -146,7 +166,8 @@ def main():
         groups = [g for _, g in ms.groupby("ckey")
                   if len(g) == 3 and set(g.node) == {"r1", "r2", "r3"}]
         rng.shuffle(groups)
-        arms = {"ALL": [], "ORACLE": [], "COMPL": [], "ADAPTK": []}
+        arms = {"ALL": [], "ORACLE": [], "COMPL": [], "ADAPTK": [], "EXPLK": []}
+        r2s, kes = [], []
         Y = []
         t0 = time.time()
         for g in groups:
@@ -154,7 +175,7 @@ def main():
             rids = [int(r) for r in g.sort_values("node").rid.values]
             al = r2a.get(rids[0])
             if al is None: continue
-            xs, os_, cs, ad = [], [], [], []
+            xs, os_, cs, ad, ex = [], [], [], [], []
             ok = True
             for i, rid in enumerate(rids):
                 res = ptk.rec_tok(rid, i)
@@ -163,31 +184,36 @@ def main():
                 X = np.asarray(X, np.float32)
                 masks = oracle_mask(rid, X, nw)
                 if masks is None: ok = False; break
-                mo, ma = masks
-                if mo.sum() < 8 or (~mo).sum() < 8 or ma.sum() < 8:
+                mo, ma, me, r2v, kev = masks
+                if mo.sum() < 8 or (~mo).sum() < 8 or ma.sum() < 8 \
+                        or me.sum() < 8:
                     ok = False; break
                 xs.append(X); os_.append(X[mo]); cs.append(X[~mo])
-                ad.append(X[ma])
+                ad.append(X[ma]); ex.append(X[me])
+                r2s.append(r2v); kes.append(kev)
             if not ok: continue
             arms["ALL"].append(cap(np.concatenate(xs)))
             arms["ORACLE"].append(cap(np.concatenate(os_)))
             arms["COMPL"].append(cap(np.concatenate(cs)))
             arms["ADAPTK"].append(cap(np.concatenate(ad)))
+            arms["EXPLK"].append(cap(np.concatenate(ex)))
             Y.append(al - 1)
         Y = np.array(Y)
         print(f"\n===== SCENE {scene}: {len(Y)} clips "
-              f"({(time.time()-t0)/60:.1f}min harvest)", flush=True)
+              f"({(time.time()-t0)/60:.1f}min harvest)  "
+              f"EXPLK: mean R2 {np.mean(r2s):.3f} mean k {np.mean(kes):.2f}",
+              flush=True)
         preds = {}
-        for arm in ("ALL", "ORACLE", "ADAPTK", "COMPL"):
+        for arm in ("ALL", "ORACLE", "ADAPTK", "EXPLK", "COMPL"):
             P = classify(arms[arm])
             preds[arm] = P
             Pm = np.array([MIRROR.get(v + 1, v + 1) for v in P])
             Ym = np.array([MIRROR.get(v + 1, v + 1) for v in Y])
             print(f"  [{arm:6s}] 17-class {np.mean(P == Y):.3f}  merged "
                   f"{np.mean(Pm == Ym):.3f}  (chance 0.059)", flush=True)
-        print(f"\n  confusion SCENE {scene} (ADAPTK arm, rows=true, top-3):",
+        print(f"\n  confusion SCENE {scene} (EXPLK arm, rows=true, top-3):",
               flush=True)
-        P = preds["ADAPTK"]
+        P = preds["EXPLK"]
         for k in range(NC):
             m = Y == k
             if not m.any(): continue
