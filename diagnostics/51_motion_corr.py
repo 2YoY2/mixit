@@ -127,19 +127,30 @@ def main():
             named = np.array([(msk >> s) & 1 > 0 for s in hard])
             ec = np.zeros(nw); np.add.at(ec, widx, e)
             es = np.zeros(nw); np.add.at(es, widx[named], e[named])
+            esum = np.zeros(nw)
+            best = -2.0
+            for m in range(M):
+                em = np.zeros(nw)
+                np.add.at(em, widx[hard == m], e[hard == m])
+                esum += em
+                c_ = corr(em, G)
+                if np.isfinite(c_) and c_ > best: best = c_
             renv = raw_env(os.path.join(ROOT, r2f[rid]), nw)
             if renv is None: continue
-            rows.append((corr(renv, G), corr(ec, G), corr(es, G)))
+            rows.append((corr(renv, G), corr(ec, G), corr(es, G),
+                         corr(esum, G), best))
         A = np.array(rows, float)
         A = A[np.isfinite(A).all(1)]
         print(f"\n=== SCENE {scene} (N={len(A)}, "
               f"{(time.time()-t0)/60:.1f}min)", flush=True)
-        for i, nm in enumerate(("RAW  ", "CLEAN", "SLOTS")):
+        for i, nm in enumerate(("RAW     ", "CLEAN   ", "NAMED   ",
+                                "SLOT-SUM", "BEST-1  ")):
             print(f"  {nm}: median r {np.median(A[:, i]):+.3f}  "
                   f"mean {A[:, i].mean():+.3f}", flush=True)
         print(f"  paired: CLEAN>RAW {np.mean(A[:,1]>A[:,0])*100:.0f}%  "
-              f"SLOTS>CLEAN {np.mean(A[:,2]>A[:,1])*100:.0f}%  "
-              f"SLOTS>RAW {np.mean(A[:,2]>A[:,0])*100:.0f}%", flush=True)
+              f"SLOTSUM>CLEAN {np.mean(A[:,3]>A[:,1])*100:.0f}%  "
+              f"BEST1>CLEAN {np.mean(A[:,4]>A[:,1])*100:.0f}%  "
+              f"NAMED>CLEAN {np.mean(A[:,2]>A[:,1])*100:.0f}%", flush=True)
     print("probe 51 done", flush=True)
 
 if __name__ == "__main__":
