@@ -47,8 +47,9 @@ print(f"MH model {CK} step {ck.get('step')}", flush=True)
 man = pd.read_csv(f"{ptk.TOK}/manifest.csv")
 # mu/sd from a light sample of train-scene pose files (no full build)
 rng = np.random.default_rng(0)
+MUSCENES = [int(v) for v in os.environ.get("MUSCENES", "1,2,3").split(",")]
 tr_rids = rng.permutation(np.array(
-    man[man.scene.isin([1, 2, 3])].rid.values))[:600]
+    man[man.scene.isin(MUSCENES)].rid.values))[:600]
 ps = []
 for rid in tr_rids:
     f = f"{ptk.TOK}/pose/{int(rid):06d}.npy"
