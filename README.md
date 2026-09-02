@@ -101,9 +101,22 @@ margin loss**, and purity reported every eval. Two separate models
 (PA 6h, WiMANS 4h), workspace `~/zerdani/buffer/clusterv2/`, v1 untouched.
 Chain: `clusterv2/logs/launch_v2_chain.sh` → benches → PA → WiMANS →
 v1-vs-v2 purity table → marker `logs/v2chain.marker`.
-**Watch out**: PA purity reads 0.99 early — if v1 scores the same in the
-referee eval, the bench is too easy and must be hardened before believing
-any gain.
+**CONFIRMED 09-02 morning: the bench IS too easy as first built** — v1
+baseline scores purity 0.993 (same as v2-in-training) because hard
+ownership (>0.8 dominance) excluded **73% of token energy**; both models
+were graded on the trivial remainder. Fix landed: **soft ownership
+ratios** (`ratio` per token; SOFT-purity in the referee charges contested
+energy). Val splits rebuilt as `{ds}_val2` (`SPLITS=val SUFF=2`) —
+**rerun the referee with `SUFF=2`; the chain's built-in referee uses the
+saturated val.** Also fixed: WiMANS val was empty (NPAIR=3000 > its
+~1,780 total solo pairs; corrected 1450/300). Owed: train-split soft
+regeneration (~1.5h with `OMP_NUM_THREADS=1` — forgetting that pin is
+why the benches took all night) → r2 with full-coverage ownership loss
+if the r1 referee underwhelms.
+**Ops 09-02**: server↔github outage — `clusterv2/code` received the
+bench/eval fixes via ssh and is DIRTY vs git; reconcile on next
+successful pull. The bench doubles as a reusable asset: ~5,200 labeled
+physical 2-actor mixes, incl. the first 2-person-PA corpus.
 
 ## Deliverables + honest boundaries
 | deliverable | state |
