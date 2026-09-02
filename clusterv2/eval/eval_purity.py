@@ -57,8 +57,9 @@ def evaluate(tag, ckpath, mixes):
     ck = torch.load(ckpath, map_location=dev, weights_only=False)
     model, M = build_model(ck)
     purs, sirs, accs, excl = [], [], [], []
+    soft = []
     with torch.no_grad():
-        for t, own, nw in mixes:
+        for t, own, nw, ratio in mixes:
             X, e = feats(t, nw)
             a = model(torch.from_numpy(X)[None].to(dev))[0]
             hard = a.argmax(1).cpu().numpy()
@@ -83,19 +84,33 @@ def evaluate(tag, ckpath, mixes):
             sirs.append(10 * np.log10(min(p, 1 - 1e-4)
                                       / max(1 - p, 1e-4)))
             accs.append(acc_n / max(acc_d, 1e-12))
+            if ratio is not None:
+                alive = np.isfinite(ratio)
+                st = sp = 0.0
+                for m_ in range(M):
+                    sel = (hard == m_) & alive
+                    if not sel.any(): continue
+                    eA = (e[sel] * ratio[sel]).sum()
+                    eB = (e[sel] * (1 - ratio[sel])).sum()
+                    st += eA + eB
+                    sp += max(eA, eB)
+                if st > 0: soft.append(sp / st)
+    sf = f"  SOFT-purity {np.mean(soft):.3f}" if soft else ""
     print(f"[{tag:18s}] M={M}  purity {np.mean(purs):.3f}  "
           f"slot-SIR {np.mean(sirs):5.1f} dB  tok-acc {np.mean(accs):.3f}"
-          f"  excluded {np.mean(excl):.2f}  (N={len(purs)})", flush=True)
+          f"  excluded {np.mean(excl):.2f}{sf}  (N={len(purs)})",
+          flush=True)
 
 def main():
-    d = f"{BENCHD}/{DATASET}_val"
+    d = f"{BENCHD}/{DATASET}_val" + os.environ.get("SUFF", "")
     fs = sorted(glob.glob(f"{d}/*.npz"))[:NMIX]
     mixes = []
     for f in fs:
         z = np.load(f)
         t, own, nw = z["toks"], z["own"].astype(np.int64), int(z["nw"])
+        ratio = z["ratio"].astype(np.float64) if "ratio" in z.files else None
         if len(t) < 32 or (own >= 0).sum() < 16: continue
-        mixes.append((t, own, nw))
+        mixes.append((t, own, nw, ratio))
     print(f"{DATASET} bench val: {len(mixes)} mixes", flush=True)
     if CKV1: evaluate("v1", CKV1, mixes)
     if CKV2: evaluate("v2", CKV2, mixes)

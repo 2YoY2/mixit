@@ -133,6 +133,7 @@ if DATASET == "pa":
             if ea is None or eb is None: return 0
             fla, flb = np.median(ea), np.median(eb)
             own = np.full(len(toks), -1, np.int8)
+            ratio = np.full(len(toks), np.nan, np.float16)
             for k, t in enumerate(toks):
                 w = int(t[0])
                 fdx = int(np.argmin(np.abs(tp.FPOS - t[1])))
@@ -140,9 +141,10 @@ if DATASET == "pa":
                 va, vb = ea[w, fdx], eb[w, fdx]
                 if va < fla and vb < flb: continue
                 r = va / (va + vb + 1e-12)
+                ratio[k] = r
                 if r > 0.8: own[k] = 0
                 elif r < 0.2: own[k] = 1
-            np.savez(of, toks=toks, nw=np.int64(nw), own=own)
+            np.savez(of, toks=toks, nw=np.int64(nw), own=own, ratio=ratio)
             return 1
         except Exception:
             return 0
@@ -211,6 +213,7 @@ else:
             if ea is None or eb is None: return 0
             fla, flb = np.median(ea), np.median(eb)
             own = np.full(len(toks), -1, np.int8)
+            ratio = np.full(len(toks), np.nan, np.float16)
             for k, t in enumerate(toks):
                 w = int(t[0])
                 fdx = int(np.argmin(np.abs(tw.FPOS - t[1])))
@@ -218,9 +221,10 @@ else:
                 va, vb = ea[w, fdx], eb[w, fdx]
                 if va < fla and vb < flb: continue
                 r = va / (va + vb + 1e-12)
+                ratio[k] = r
                 if r > 0.8: own[k] = 0
                 elif r < 0.2: own[k] = 1
-            np.savez(of, toks=toks, nw=np.int64(nw), own=own)
+            np.savez(of, toks=toks, nw=np.int64(nw), own=own, ratio=ratio)
             return 1
         except Exception:
             return 0
