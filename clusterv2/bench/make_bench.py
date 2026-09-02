@@ -228,7 +228,10 @@ else:
 def main():
     pairs = make_pairs()
     print(f"{DATASET}: {len(pairs)} candidate pairs", flush=True)
-    for split, n0, n1 in (("train", 0, NPAIR), ("val", NPAIR, NPAIR + NVAL)):
+    # clamp so val ALWAYS exists and never overlaps train (WiMANS has far
+    # fewer pairs than NPAIR: 1782)
+    ntr = min(NPAIR, max(0, len(pairs) - NVAL))
+    for split, n0, n1 in (("train", 0, ntr), ("val", ntr, ntr + NVAL)):
         od = f"{BENCHD}/{DATASET}_{split}"
         os.makedirs(od, exist_ok=True)
         jobs = [(i - n0, pairs[i][0], pairs[i][1], od)

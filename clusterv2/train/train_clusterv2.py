@@ -82,8 +82,27 @@ def feats(t, nw):
 def load_bench(split):
     d = f"{BENCHD}/{DATASET}_{split}"
     fs = sorted(glob.glob(f"{d}/*.npz"))
+    # contamination guard: keep only files listed in THIS split's meta and
+    # whose (a,b) pair does not appear in the val meta (stale files from an
+    # earlier, wider split are dropped)
+    keep = None
+    try:
+        mt = pd.read_csv(f"{d}/meta.csv")
+        valid = {int(i) for i in mt.i.values}
+        pair_of = {int(r.i): (r.a, r.b) for r in mt.itertuples()}
+        vpairs = set()
+        if split == "train":
+            mv = pd.read_csv(f"{BENCHD}/{DATASET}_val/meta.csv")
+            vpairs = {(r.a, r.b) for r in mv.itertuples()} | \
+                     {(r.b, r.a) for r in mv.itertuples()}
+        keep = lambda f: (int(os.path.basename(f)[:6]) in valid and
+                          pair_of.get(int(os.path.basename(f)[:6]))
+                          not in vpairs)
+    except Exception:
+        keep = None
     out = []
     for f in fs:
+        if keep is not None and not keep(f): continue
         z = np.load(f)
         t, own, nw = z["toks"], z["own"], int(z["nw"])
         if len(t) < 32 or (own >= 0).sum() < 16: continue
