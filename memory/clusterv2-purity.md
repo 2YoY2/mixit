@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: a9cc9e6b-eaff-4bc0-b6af-9293cd89d6f3
-  modified: 2026-09-02T07:31:00.251Z
+  modified: 2026-09-02T07:34:53.841Z
 ---
 
 **THE CURRENT THREAD (started 2026-09-01 night).** Everything else in
@@ -61,6 +61,13 @@ load_bench (drops stale files not in the current train meta or whose
 (a,b) pair is in val meta). WiMANS val rebuild launched
 (log_bench_wimans_fix.txt, marker benchfix.marker) — must finish before
 the chain reaches WiMANS training (~6h away).
+
+**SOFT-PURITY (user's addition to eval_purity.py):** bench now also saves
+a per-token `ratio` (continuous eA/(eA+eB)); eval computes SOFT-purity
+over ALL tokens instead of only the hard-thresholded ones — the honest
+answer to "is the bench too easy" (hard purity ignores collisions by
+construction). **Benches built before 09-02 have no `ratio` field, so
+SOFT-purity is silently absent until a bench rebuild.**
 
 **ACCEPTANCE (in clusterv2/README.md):** (1) bench purity up vs v1 at the
 SAME M — purity inflates with slot count, classic caveat; (2) v1 gates
