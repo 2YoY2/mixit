@@ -42,3 +42,37 @@ presence_head.py gate_tokens.py superposition_seed.py
 
 STATUS: scaffold only — actual v2 training code NOT yet written
 (user green light pending).
+
+## PRE-FLIGHT CHECK (run before trusting any WiMANS purity number)
+The WiMANS bench was first built with a broken split (val reserved at pair
+index 3000+, but only ~1782 pairs exist -> empty val). Fixed by clamping
+`ntr = min(NPAIR, len(pairs) - NVAL)` plus a train/val contamination guard
+in `load_bench` (drops files not in the current train meta, or whose (a,b)
+pair appears in the val meta). The rebuild was still running at handoff and
+its bookkeeping is NOT yet verified — meta row counts did not obviously
+reconcile with the printed pair count. Verify:
+
+```bash
+# on rosebyte
+python3 - <<'PY'
+import pandas as pd, glob, os
+B=os.path.expanduser("~/zerdani/buffer/clusterv2/bench")
+for ds in ("pa","wimans"):
+    tr=pd.read_csv(f"{B}/{ds}_train/meta.csv"); va=pd.read_csv(f"{B}/{ds}_val/meta.csv")
+    tp={(r.a,r.b) for r in tr.itertuples()}; vp={(r.a,r.b) for r in va.itertuples()}
+    print(ds,"train rows",len(tr),"val rows",len(va),
+          "npz",len(glob.glob(f"{B}/{ds}_train/*.npz")),len(glob.glob(f"{B}/{ds}_val/*.npz")),
+          "OVERLAP",len(tp&vp))
+PY
+```
+Requirements: val rows > 0, OVERLAP == 0. (Stale npz in `*_train` beyond the
+meta are expected and are filtered by the guard — do not delete them without
+asking the user.)
+
+## Purity sanity gate
+PA training shows PURITY ~0.99 within 14k steps. **If the referee eval
+(`eval/eval_purity.py`) shows v1 scoring ~the same, the bench is too easy
+and the gain is meaningless.** Harden it before believing anything:
+tighten ownership thresholds (0.8/0.2 -> 0.65/0.35), pair energy-matched
+recordings, or prefer pairs with higher TF overlap. Report purity together
+with slot-SIR (dB) and the excluded-energy fraction, at fixed M.
