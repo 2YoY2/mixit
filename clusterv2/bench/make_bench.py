@@ -133,6 +133,7 @@ if DATASET == "pa":
             if ea is None or eb is None: return 0
             fla, flb = np.median(ea), np.median(eb)
             own = np.full(len(toks), -1, np.int8)
+            ratio = np.full(len(toks), np.nan, np.float32)
             ratio = np.full(len(toks), np.nan, np.float16)
             for k, t in enumerate(toks):
                 w = int(t[0])
@@ -213,6 +214,7 @@ else:
             if ea is None or eb is None: return 0
             fla, flb = np.median(ea), np.median(eb)
             own = np.full(len(toks), -1, np.int8)
+            ratio = np.full(len(toks), np.nan, np.float32)
             ratio = np.full(len(toks), np.nan, np.float16)
             for k, t in enumerate(toks):
                 w = int(t[0])
